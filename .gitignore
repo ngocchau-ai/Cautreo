@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmarks / runtime
+benchmarks/*/checkpoint.json
+benchmarks/*/results*.json
+*.bin
+*.gguf
