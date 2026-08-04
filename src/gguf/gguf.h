@@ -134,6 +134,10 @@ const gguf_tensor_info_t *gguf_find_tensor(const gguf_file_t *g, const char *nam
 /* Lazy tensor read: đọc weights từ file vào buffer (không load toàn bộ). */
 bool gguf_read_tensor(const gguf_file_t *g, const char *name, void *dst, size_t dst_size);
 
+/* Lazy tensor read tại byte offset trong tensor (vd: embedding row của 1 token). */
+bool gguf_read_tensor_at(const gguf_file_t *g, const char *name, void *dst,
+                      size_t dst_size, uint64_t byte_offset);
+
 /* Common model params */
 uint32_t gguf_n_layers(const gguf_file_t *g);
 uint32_t gguf_n_embd(const gguf_file_t *g);

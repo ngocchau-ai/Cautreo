@@ -36,7 +36,7 @@ typedef enum {
 } ct_device_t;
 
 /* ---------------------------------------------------------------------------
- * KV cache configuration
+ * KV cache configuration (engine-level; kv_cache module dùng ct_kv_config_t riêng)
  * ------------------------------------------------------------------------- */
 typedef struct {
     uint32_t n_layers;        /* number of transformer layers */
@@ -48,7 +48,7 @@ typedef struct {
     uint32_t sliding_window;  /* raw sliding-window tokens (e.g. 128) */
     uint32_t compress_ratio;  /* tokens per compressed row (e.g. 4) */
     uint32_t indexer_topk;    /* top-k compressed rows for attention */
-} ct_kv_config_t;
+} ct_engine_kv_config_t;
 
 /* ---------------------------------------------------------------------------
  * Engine handle (opaque)

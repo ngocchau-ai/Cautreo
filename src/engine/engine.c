@@ -4,6 +4,10 @@
 
 #include "engine/engine.h"
 
+#include "model/model.h"
+#include "transformer/transformer.h"
+
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +20,12 @@ struct ct_engine {
     ct_model_info_t     info;
     bool               loaded;
 
+    /* GGUF-backed model + transformer (backend = CT_BACKEND_GGUF) */
+    ct_model_t        *model;
+    ct_transformer_t  *tf;
+
     /* KV cache state */
-    ct_kv_config_t     kv;
+    ct_engine_kv_config_t kv;
     int32_t           *kv_tokens;      /* token ids in cache */
     size_t             kv_len;           /* tokens currently in cache */
     size_t             kv_cap;
@@ -85,6 +93,8 @@ ct_engine_t *ct_engine_create(const ct_engine_options_t *opts) {
 
 void ct_engine_destroy(ct_engine_t *e) {
     if (!e) return;
+    if (e->tf) ct_transformer_free(e->tf);
+    if (e->model) ct_model_free(e->model);
     free(e->kv_tokens);
     free(e);
 }
@@ -94,13 +104,46 @@ void ct_engine_destroy(ct_engine_t *e) {
  * ------------------------------------------------------------------------- */
 bool ct_engine_load(ct_engine_t *e) {
     if (!e) return false;
-    /* Backend-specific loading is delegated; here we mark loaded and set defaults.
-     * Real GGUF/Safetensors loaders plug in via the backend layer. */
+    if (e->loaded) return true;
+
+    if (e->opts.backend == CT_BACKEND_GGUF && e->opts.model_path) {
+        e->model = ct_model_load(e->opts.model_path);
+        if (!e->model || !ct_model_is_loaded(e->model)) {
+            if (e->model) { ct_model_free(e->model); e->model = NULL; }
+            return false;
+        }
+        e->tf = ct_transformer_create(e->model, e->opts.ctx_size ? e->opts.ctx_size : 4096);
+        if (!e->tf) {
+            ct_model_free(e->model); e->model = NULL;
+            return false;
+        }
+        /* Sync model info */
+        e->info.n_layers = ct_model_n_layers(e->model);
+        e->info.n_vocab  = ct_model_n_vocab(e->model);
+        e->info.n_experts = ct_model_n_experts(e->model);
+        e->info.n_active_experts = ct_model_n_experts_used(e->model);
+        e->info.is_moe = ct_model_is_moe(e->model);
+        e->info.n_params = ct_model_n_params(e->model);
+        e->info.model_bytes = e->info.n_params * sizeof(float);
+        /* KV config from model */
+        e->kv.n_layers = ct_model_n_layers(e->model);
+        e->kv.n_heads  = ct_model_n_head(e->model);
+        e->kv.head_dim  = ct_model_head_dim(e->model);
+        e->kv.ctx_size = e->opts.ctx_size ? e->opts.ctx_size : ct_model_n_ctx(e->model);
+        e->kv_cap = e->kv.ctx_size;
+        free(e->kv_tokens);
+        e->kv_tokens = (int32_t *)malloc(e->kv_cap * sizeof(int32_t));
+        if (!e->kv_tokens) return false;
+        e->kv_len = 0;
+    } else {
+        /* Non-GGUF backend: placeholder defaults (backend layer plugs in later). */
+        if (e->info.n_layers == 0) e->info.n_layers = 32;
+        if (e->info.n_vocab == 0)  e->info.n_vocab = 128256;
+        e->info.is_moe = (e->info.n_experts > 0);
+    }
+
     e->loaded = true;
     e->info.is_loaded = true;
-    if (e->info.n_layers == 0) e->info.n_layers = 32;
-    if (e->info.n_vocab == 0)  e->info.n_vocab = 128256;
-    e->info.is_moe = (e->info.n_experts > 0);
     return true;
 }
 
@@ -159,14 +202,70 @@ bool ct_engine_generate(ct_engine_t *e,
                       uint32_t max_tokens, float temperature,
                       ct_generation_t *out) {
     if (!e || !out) return false;
-    (void)temperature;
     memset(out, 0, sizeof(*out));
     out->n_prompt_tokens = n_prompt;
 
-    /* Backend performs actual forward passes. Here we provide the orchestration shell:
-     * append prompt to KV, then decode max_tokens tokens. */
+    /* GGUF backend: real forward via transformer. */
+    if (e->tf) {
+        ct_transformer_reset(e->tf);
+        e->kv_len = 0;
+
+        /* Prefill: forward each prompt token, capture logits of last. */
+        const float *logits = NULL;
+        for (size_t i = 0; i < n_prompt; i++) {
+            logits = ct_transformer_forward(e->tf, prompt[i], (uint32_t)i);
+            e->kv_tokens[e->kv_len++] = prompt[i];
+        }
+        out->n_prompt_tokens_processed = n_prompt;
+
+        uint32_t gen = max_tokens;
+        if (e->kv_len + gen > e->kv_cap) {
+            gen = (uint32_t)(e->kv_cap - e->kv_len);
+            out->truncated = true;
+        }
+        out->tokens = (int32_t *)malloc((gen ? gen : 1) * sizeof(int32_t));
+        if (!out->tokens) return false;
+
+        for (uint32_t i = 0; i < gen; i++) {
+            int32_t tok;
+            if (logits) {
+                if (temperature <= 0.0f) {
+                    tok = ct_transformer_argmax(logits, e->info.n_vocab);
+                } else {
+                    /* Simple temperature sampling (softmax). */
+                    float mx = logits[0];
+                    for (uint32_t j = 1; j < e->info.n_vocab; j++) if (logits[j] > mx) mx = logits[j];
+                    double sum = 0.0;
+                    float *p = (float *)malloc(e->info.n_vocab * sizeof(float));
+                    if (!p) { free(out->tokens); out->tokens = NULL; return false; }
+                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
+                        p[j] = expf((logits[j] - mx) / temperature);
+                        sum += p[j];
+                    }
+                    double r = (double)rand() / (double)RAND_MAX * sum;
+                    double acc = 0.0; tok = 0;
+                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
+                        acc += p[j];
+                        if (acc >= r) { tok = (int32_t)j; break; }
+                    }
+                    free(p);
+                }
+            } else {
+                tok = 0;
+            }
+            out->tokens[i] = tok;
+            e->kv_tokens[e->kv_len++] = tok;
+            logits = ct_transformer_forward(e->tf, tok, (uint32_t)(e->kv_len - 1));
+        }
+        out->n_tokens = gen;
+        out->n_gen_tokens = gen;
+        out->gen_tps = 0.0;
+        return true;
+    }
+
+    /* Non-GGUF backend: orchestration shell (placeholder tokens). */
+    (void)temperature;
     if (e->kv_len + n_prompt > e->kv_cap) {
-        /* Simple truncation fallback (real backends do chunked prefill). */
         n_prompt = e->kv_cap - e->kv_len;
     }
     for (size_t i = 0; i < n_prompt; i++) {

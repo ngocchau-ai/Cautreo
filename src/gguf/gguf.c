@@ -178,9 +178,14 @@ const gguf_tensor_info_t *gguf_find_tensor(const gguf_file_t *g, const char *nam
 }
 
 bool gguf_read_tensor(const gguf_file_t *g, const char *name, void *dst, size_t dst_size) {
+    return gguf_read_tensor_at(g, name, dst, dst_size, 0);
+}
+
+bool gguf_read_tensor_at(const gguf_file_t *g, const char *name, void *dst,
+                      size_t dst_size, uint64_t byte_offset) {
     const gguf_tensor_info_t *t = gguf_find_tensor(g, name);
     if (!t || !dst) return false;
-    if (fseek(g->fp, (long)(g->data_offset + t->offset), SEEK_SET) != 0) return false;
+    if (fseek(g->fp, (long)(g->data_offset + t->offset + byte_offset), SEEK_SET) != 0) return false;
     return fread(dst, 1, dst_size, g->fp) == dst_size;
 }
 
