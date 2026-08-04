@@ -19,7 +19,8 @@ TEST_DIR  := $(BUILD_DIR)/tests
 # ---------------------------------------------------------------------------
 CORE_SRCS   := $(wildcard src/core/*/*.c)
 ENGINE_SRCS  := $(wildcard src/engine/*.c src/streaming/*.c src/distributed/*.c \
-                          src/steering/*.c src/speculative/*.c src/quant/*.c)
+                          src/steering/*.c src/speculative/*.c src/quant/*.c \
+                          src/gguf/*.c src/kv_cache/*.c src/attention/*.c src/backend/*.c)
 
 CORE_OBJS   := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 ENGINE_OBJS  := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(ENGINE_SRCS))
