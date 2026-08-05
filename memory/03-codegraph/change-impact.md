@@ -3,6 +3,10 @@
 Generated baseline for indexed files.
 
 ## Indexed File Paths
+- benchmarks/bench_engine.c
+- benchmarks/bench_streaming.c
+- src/agent/agent.c
+- src/agent/agent.h
 - src/attention/attention.c
 - src/attention/attention.h
 - src/backend/backend.c
@@ -45,6 +49,8 @@ Generated baseline for indexed files.
 - src/model/model.h
 - src/quant/quant.c
 - src/quant/quant.h
+- src/server/server.c
+- src/server/server.h
 - src/speculative/speculative.c
 - src/speculative/speculative.h
 - src/steering/steering.c
@@ -53,6 +59,9 @@ Generated baseline for indexed files.
 - src/streaming/streaming.h
 - src/transformer/transformer.c
 - src/transformer/transformer.h
+- tests/integration/agent_e2e_test.c
+- tests/integration/core_engine_test.c
+- tests/integration/streaming_engine_test.c
 - tests/unit/attention_test.c
 - tests/unit/backend_test.c
 - tests/unit/causal_test.c
@@ -74,3 +83,4 @@ Generated baseline for indexed files.
 - tests/unit/streaming_test.c
 - tests/unit/transformer_test.c
 - tests/unit/verification_test.c
+- tools/vivy.c

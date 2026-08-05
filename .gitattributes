@@ -1,0 +1,29 @@
+# Auto-detect text files and normalise to LF in the repository
+* text=auto eol=lf
+
+# C source
+*.c text eol=lf
+*.h text eol=lf
+
+# Make / scripts
+Makefile text eol=lf
+*.mk text eol=lf
+*.sh text eol=lf
+
+# Batch scripts: keep CRLF on Windows
+*.bat text eol=crlf
+
+# Docs / config
+*.md text eol=lf
+*.json text eol=lf
+*.gitignore text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+
+# Binaries (do not mangle)
+*.a binary
+*.o binary
+*.exe binary
+*.bin binary
+*.gguf binary

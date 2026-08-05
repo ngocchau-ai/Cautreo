@@ -1,30 +1,49 @@
 # CAUTREO (Cầu Treo) — Makefile
 #
-# Build:      make
-# Test:       make test
-# Clean:      make clean
+# Build:        make            → libcautreo_core.a + libcautreo_engine.a
+# Test:         make test       → 21 unit tests
+# Integration:  make integration→ 3 integration tests
+# All tests:    make all-tests  → unit + integration
+# Benchmark:    make bench      → performance benchmarks
+# Vivy demo:    make vivy       → tools/vivy.c demo
+# Server:       make server     → HTTP server binary
+# Agent CLI:    make agent      → agent CLI binary
+# Clean:        make clean
 #
-# Toolchain:  C11. Mặc định CC ?= gcc (LLVM-MinGW trên Windows, clang/gcc trên macOS/Linux).
+# Toolchain: C11. CC ?= gcc (LLVM-MinGW UCRT trên Windows, clang/gcc trên macOS/Linux).
 
 CC      ?= gcc
 AR      ?= ar
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -I src -I src/core
 LIBS    ?= -lm
 
+# Windows: link Winsock2 cho server
+ifeq ($(OS),Windows_NT)
+  SERVER_LIBS := -lws2_32
+else
+  SERVER_LIBS :=
+endif
+
 BUILD_DIR := build
 TEST_DIR  := $(BUILD_DIR)/tests
+INT_DIR   := $(BUILD_DIR)/integration
+BENCH_DIR := $(BUILD_DIR)/bench
 
 # ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
-CORE_SRCS   := $(wildcard src/core/*/*.c)
+CORE_SRCS    := $(wildcard src/core/*/*.c)
 ENGINE_SRCS  := $(wildcard src/engine/*.c src/streaming/*.c src/distributed/*.c \
-                          src/steering/*.c src/speculative/*.c src/quant/*.c \
-                          src/gguf/*.c src/kv_cache/*.c src/attention/*.c src/backend/*.c \
-                          src/model/*.c src/transformer/*.c)
+                           src/steering/*.c src/speculative/*.c src/quant/*.c \
+                           src/gguf/*.c src/kv_cache/*.c src/attention/*.c src/backend/*.c \
+                           src/model/*.c src/transformer/*.c)
+SERVER_SRCS  := $(wildcard src/server/*.c)
+AGENT_SRCS   := $(wildcard src/agent/*.c)
 
-CORE_OBJS   := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
+CORE_OBJS    := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 ENGINE_OBJS  := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(ENGINE_SRCS))
+SERVER_OBJS  := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SERVER_SRCS))
+AGENT_OBJS   := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(AGENT_SRCS))
 
 CORE_LIB    := $(BUILD_DIR)/libcautreo_core.a
 ENGINE_LIB  := $(BUILD_DIR)/libcautreo_engine.a
@@ -32,7 +51,7 @@ ENGINE_LIB  := $(BUILD_DIR)/libcautreo_engine.a
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all test clean core engine
+.PHONY: all test integration all-tests bench vivy server agent core engine clean
 
 all: $(CORE_LIB) $(ENGINE_LIB)
 
@@ -46,11 +65,11 @@ $(ENGINE_LIB): $(ENGINE_OBJS)
 	$(AR) rcs $@ $^
 
 $(BUILD_DIR)/%.o: src/%.c
-	@mkdir -p $(dir $@)
+	@if not exist "$(subst /,\\,$(dir $@))" mkdir "$(subst /,\\,$(dir $@))"
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---------------------------------------------------------------------------
-# Tests
+# Unit Tests
 # ---------------------------------------------------------------------------
 TEST_SRCS := $(wildcard tests/unit/*_test.c)
 TEST_BINS := $(addprefix $(TEST_DIR)/,$(notdir $(TEST_SRCS:.c=.exe)))
@@ -62,14 +81,90 @@ test: $(CORE_LIB) $(ENGINE_LIB) $(TEST_BINS)
 		echo "--- $$t ---"; \
 		./$$t || fail=1; \
 	done; \
-	if [ $$fail -eq 0 ]; then echo "ALL TEST SUITES PASS"; else echo "SOME TESTS FAILED"; exit 1; fi
+	if [ $$fail -eq 0 ]; then echo "ALL UNIT TESTS PASS"; else echo "SOME TESTS FAILED"; exit 1; fi
 
 $(TEST_DIR)/%.exe: tests/unit/%.c $(CORE_LIB) $(ENGINE_LIB)
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) -o $@
 
 # ---------------------------------------------------------------------------
+# Integration Tests
+# ---------------------------------------------------------------------------
+INT_SRCS := $(wildcard tests/integration/*_test.c)
+INT_BINS := $(addprefix $(INT_DIR)/,$(notdir $(INT_SRCS:.c=.exe)))
+
+integration: $(CORE_LIB) $(ENGINE_LIB) $(INT_BINS)
+	@echo "=== Running CAUTREO integration tests ==="
+	@fail=0; \
+	for t in $(INT_BINS); do \
+		echo "--- $$t ---"; \
+		./$$t || fail=1; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "ALL INTEGRATION TESTS PASS"; else echo "SOME INTEGRATION TESTS FAILED"; exit 1; fi
+
+$(INT_DIR)/%.exe: tests/integration/%.c $(CORE_LIB) $(ENGINE_LIB)
+	@mkdir -p $(INT_DIR)
+	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) -o $@
+
+all-tests: test integration
+	@echo "=== ALL TESTS COMPLETE ==="
+
+# ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
+BENCH_SRCS := $(wildcard benchmarks/*.c)
+BENCH_BINS := $(addprefix $(BENCH_DIR)/,$(notdir $(BENCH_SRCS:.c=.exe)))
+
+bench: $(CORE_LIB) $(ENGINE_LIB) $(BENCH_BINS)
+	@echo "=== Running CAUTREO benchmarks ==="
+	@for b in $(BENCH_BINS); do \
+		echo "--- $$b ---"; \
+		./$$b; \
+	done
+	@echo "=== Benchmarks complete ==="
+
+$(BENCH_DIR)/%.exe: benchmarks/%.c $(CORE_LIB) $(ENGINE_LIB)
+	@mkdir -p $(BENCH_DIR)
+	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) -o $@
+
+# ---------------------------------------------------------------------------
+# Vivy demo tool
+# ---------------------------------------------------------------------------
+vivy: $(CORE_LIB) $(ENGINE_LIB)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) tools/vivy.c $(CORE_LIB) $(ENGINE_LIB) $(LIBS) -o $(BUILD_DIR)/vivy.exe
+	@echo "=== Running vivy demo ==="
+	./$(BUILD_DIR)/vivy.exe
+
+# ---------------------------------------------------------------------------
+# Server binary
+# ---------------------------------------------------------------------------
+server: $(CORE_LIB) $(ENGINE_LIB) $(SERVER_OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) src/server/server_main.c $(SERVER_OBJS) \
+	      $(CORE_LIB) $(ENGINE_LIB) $(LIBS) $(SERVER_LIBS) \
+	      -o $(BUILD_DIR)/cautreo-server.exe
+	@echo "Server built: $(BUILD_DIR)/cautreo-server.exe"
+	@echo "Run: ./$(BUILD_DIR)/cautreo-server.exe --port 8080 --model <path.gguf>"
+
+# ---------------------------------------------------------------------------
+# Agent CLI binary
+# ---------------------------------------------------------------------------
+agent: $(CORE_LIB) $(ENGINE_LIB) $(AGENT_OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) src/agent/agent_main.c $(AGENT_OBJS) \
+	      $(CORE_LIB) $(ENGINE_LIB) $(LIBS) \
+	      -o $(BUILD_DIR)/cautreo-agent.exe
+	@echo "Agent built: $(BUILD_DIR)/cautreo-agent.exe"
+	@echo "Run: ./$(BUILD_DIR)/cautreo-agent.exe --model <path.gguf>"
+
+# ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
+ifeq ($(OS),Windows_NT)
+clean:
+	if exist build rd /s /q build
+else
 clean:
 	rm -rf $(BUILD_DIR)
+endif

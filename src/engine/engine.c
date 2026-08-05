@@ -296,6 +296,78 @@ void ct_engine_free_generation(ct_generation_t *g) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Streaming generation
+ * ------------------------------------------------------------------------- */
+bool ct_engine_generate_stream(ct_engine_t *e,
+                               const int32_t *prompt, size_t n_prompt,
+                               uint32_t max_tokens, float temperature,
+                               ct_generate_callback_t callback, void *userdata) {
+    if (!e || !callback) return false;
+
+    if (e->tf) {
+        ct_transformer_reset(e->tf);
+        e->kv_len = 0;
+
+        /* Prefill */
+        const float *logits = NULL;
+        for (size_t i = 0; i < n_prompt; i++) {
+            logits = ct_transformer_forward(e->tf, prompt[i], (uint32_t)i);
+            e->kv_tokens[e->kv_len < e->kv_cap ? e->kv_len++ : e->kv_len - 1] = prompt[i];
+        }
+        /* Signal prefill done */
+        if (!callback(-1, false, userdata)) return true;
+
+        uint32_t gen = max_tokens;
+        if (e->kv_len + gen > e->kv_cap)
+            gen = (uint32_t)(e->kv_cap - e->kv_len);
+
+        for (uint32_t i = 0; i < gen; i++) {
+            int32_t tok = 0;
+            if (logits) {
+                if (temperature <= 0.0f) {
+                    tok = ct_transformer_argmax(logits, e->info.n_vocab);
+                } else {
+                    float mx = logits[0];
+                    for (uint32_t j = 1; j < e->info.n_vocab; j++)
+                        if (logits[j] > mx) mx = logits[j];
+                    double sum = 0.0;
+                    float *p = (float *)malloc(e->info.n_vocab * sizeof(float));
+                    if (!p) break;
+                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
+                        p[j] = expf((logits[j] - mx) / temperature);
+                        sum += p[j];
+                    }
+                    double r = (double)rand() / (double)RAND_MAX * sum;
+                    double acc = 0.0;
+                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
+                        acc += p[j];
+                        if (acc >= r) { tok = (int32_t)j; break; }
+                    }
+                    free(p);
+                }
+            }
+            bool is_last = (i == gen - 1);
+            if (!callback(tok, is_last, userdata)) break;
+            if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = tok;
+            logits = ct_transformer_forward(e->tf, tok, (uint32_t)(e->kv_len - 1));
+        }
+        return true;
+    }
+
+    /* Non-GGUF backend placeholder */
+    if (!callback(-1, false, userdata)) return true;
+    uint32_t gen = max_tokens;
+    if (e->kv_len + gen > e->kv_cap) gen = (uint32_t)(e->kv_cap - e->kv_len);
+    for (uint32_t i = 0; i < gen; i++) {
+        int32_t tok = (int32_t)(e->kv_len + i);
+        bool is_last = (i == gen - 1);
+        if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = tok;
+        if (!callback(tok, is_last, userdata)) break;
+    }
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
  * KV cache management
  * ------------------------------------------------------------------------- */
 bool ct_engine_kv_reset(ct_engine_t *e) {

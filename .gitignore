@@ -14,13 +14,26 @@ venv/
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Benchmarks / runtime
+# Benchmarks / runtime artifacts
 benchmarks/*/checkpoint.json
 benchmarks/*/results*.json
 *.bin
 *.gguf
+
+# KV cache checkpoints (runtime)
+kv_cache_*.kv
+bench_kv.bin
+*_synth.gguf
+
+# Codegraph output is committed but large JSON can be ignored
+# memory/03-codegraph/*.json
+
+# GitHub Actions (add if/when CI is configured)
+# .github/

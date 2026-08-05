@@ -137,6 +137,18 @@ bool ct_engine_generate(ct_engine_t *e,
 void ct_engine_free_generation(ct_generation_t *g);
 
 /* ---------------------------------------------------------------------------
+ * Streaming generation (token-by-token callback)
+ * Callback: token=-1 signals prefill done; token=-2 signals generation done.
+ * Return false from callback to abort early.
+ * ------------------------------------------------------------------------- */
+typedef bool (*ct_generate_callback_t)(int32_t token, bool done, void *userdata);
+
+bool ct_engine_generate_stream(ct_engine_t *e,
+                               const int32_t *prompt, size_t n_prompt,
+                               uint32_t max_tokens, float temperature,
+                               ct_generate_callback_t callback, void *userdata);
+
+/* ---------------------------------------------------------------------------
  * KV cache management
  * ------------------------------------------------------------------------- */
 bool ct_engine_kv_reset(ct_engine_t *e);

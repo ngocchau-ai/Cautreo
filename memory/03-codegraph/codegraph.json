@@ -1,9 +1,41 @@
 {
   "schema_version": "0.1",
   "status": "FRESH",
-  "repository_head": "a18ea948e13a48cc3ee82be38fdf0a042fef8092",
-  "codegraph_commit": "a18ea948e13a48cc3ee82be38fdf0a042fef8092",
+  "repository_head": "29b0417bcdea105f84d7e0bf43ba8c800bd8701c",
+  "codegraph_commit": "29b0417bcdea105f84d7e0bf43ba8c800bd8701c",
   "nodes": [
+    {
+      "id": "file:benchmarks/bench_engine.c",
+      "kind": "file",
+      "name": "bench_engine.c",
+      "qualified_name": "benchmarks/bench_engine.c",
+      "path": "benchmarks/bench_engine.c",
+      "line": 1
+    },
+    {
+      "id": "file:benchmarks/bench_streaming.c",
+      "kind": "file",
+      "name": "bench_streaming.c",
+      "qualified_name": "benchmarks/bench_streaming.c",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 1
+    },
+    {
+      "id": "file:src/agent/agent.c",
+      "kind": "file",
+      "name": "agent.c",
+      "qualified_name": "src/agent/agent.c",
+      "path": "src/agent/agent.c",
+      "line": 1
+    },
+    {
+      "id": "file:src/agent/agent.h",
+      "kind": "file",
+      "name": "agent.h",
+      "qualified_name": "src/agent/agent.h",
+      "path": "src/agent/agent.h",
+      "line": 1
+    },
     {
       "id": "file:src/attention/attention.c",
       "kind": "file",
@@ -341,6 +373,22 @@
       "line": 1
     },
     {
+      "id": "file:src/server/server.c",
+      "kind": "file",
+      "name": "server.c",
+      "qualified_name": "src/server/server.c",
+      "path": "src/server/server.c",
+      "line": 1
+    },
+    {
+      "id": "file:src/server/server.h",
+      "kind": "file",
+      "name": "server.h",
+      "qualified_name": "src/server/server.h",
+      "path": "src/server/server.h",
+      "line": 1
+    },
+    {
       "id": "file:src/speculative/speculative.c",
       "kind": "file",
       "name": "speculative.c",
@@ -402,6 +450,30 @@
       "name": "transformer.h",
       "qualified_name": "src/transformer/transformer.h",
       "path": "src/transformer/transformer.h",
+      "line": 1
+    },
+    {
+      "id": "file:tests/integration/agent_e2e_test.c",
+      "kind": "file",
+      "name": "agent_e2e_test.c",
+      "qualified_name": "tests/integration/agent_e2e_test.c",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 1
+    },
+    {
+      "id": "file:tests/integration/core_engine_test.c",
+      "kind": "file",
+      "name": "core_engine_test.c",
+      "qualified_name": "tests/integration/core_engine_test.c",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 1
+    },
+    {
+      "id": "file:tests/integration/streaming_engine_test.c",
+      "kind": "file",
+      "name": "streaming_engine_test.c",
+      "qualified_name": "tests/integration/streaming_engine_test.c",
+      "path": "tests/integration/streaming_engine_test.c",
       "line": 1
     },
     {
@@ -571,6 +643,326 @@
       "qualified_name": "tests/unit/verification_test.c",
       "path": "tests/unit/verification_test.c",
       "line": 1
+    },
+    {
+      "id": "file:tools/vivy.c",
+      "kind": "file",
+      "name": "vivy.c",
+      "qualified_name": "tools/vivy.c",
+      "path": "tools/vivy.c",
+      "line": 1
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "benchmarks.bench_engine.main",
+      "path": "benchmarks/bench_engine.c",
+      "line": 77
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:now_sec",
+      "kind": "function",
+      "name": "now_sec",
+      "qualified_name": "benchmarks.bench_engine.now_sec",
+      "path": "benchmarks/bench_engine.c",
+      "line": 22
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:row",
+      "kind": "function",
+      "name": "row",
+      "qualified_name": "benchmarks.bench_engine.row",
+      "path": "benchmarks/bench_engine.c",
+      "line": 70
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:scb_fn",
+      "kind": "function",
+      "name": "scb_fn",
+      "qualified_name": "benchmarks.bench_engine.scb_fn",
+      "path": "benchmarks/bench_engine.c",
+      "line": 28
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:sep",
+      "kind": "function",
+      "name": "sep",
+      "qualified_name": "benchmarks.bench_engine.sep",
+      "path": "benchmarks/bench_engine.c",
+      "line": 73
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "benchmarks.bench_engine.wr_f32",
+      "path": "benchmarks/bench_engine.c",
+      "line": 39
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "benchmarks.bench_engine.wr_str",
+      "path": "benchmarks/bench_engine.c",
+      "line": 38
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_ti",
+      "kind": "function",
+      "name": "wr_ti",
+      "qualified_name": "benchmarks.bench_engine.wr_ti",
+      "path": "benchmarks/bench_engine.c",
+      "line": 40
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "benchmarks.bench_engine.wr_u32",
+      "path": "benchmarks/bench_engine.c",
+      "line": 35
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "benchmarks.bench_engine.wr_u64",
+      "path": "benchmarks/bench_engine.c",
+      "line": 37
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "benchmarks.bench_engine.wr_u8",
+      "path": "benchmarks/bench_engine.c",
+      "line": 36
+    },
+    {
+      "id": "func:benchmarks/bench_engine.c:write_synth",
+      "kind": "function",
+      "name": "write_synth",
+      "qualified_name": "benchmarks.bench_engine.write_synth",
+      "path": "benchmarks/bench_engine.c",
+      "line": 43
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:bench_generate",
+      "kind": "function",
+      "name": "bench_generate",
+      "qualified_name": "benchmarks.bench_streaming.bench_generate",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 61
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:hdr",
+      "kind": "function",
+      "name": "hdr",
+      "qualified_name": "benchmarks.bench_streaming.hdr",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 59
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "benchmarks.bench_streaming.main",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 74
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:now_sec",
+      "kind": "function",
+      "name": "now_sec",
+      "qualified_name": "benchmarks.bench_streaming.now_sec",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 19
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:sep",
+      "kind": "function",
+      "name": "sep",
+      "qualified_name": "benchmarks.bench_streaming.sep",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 58
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "benchmarks.bench_streaming.wr_f32",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 28
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "benchmarks.bench_streaming.wr_str",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 27
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_ti",
+      "kind": "function",
+      "name": "wr_ti",
+      "qualified_name": "benchmarks.bench_streaming.wr_ti",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 29
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "benchmarks.bench_streaming.wr_u32",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 24
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "benchmarks.bench_streaming.wr_u64",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 26
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "benchmarks.bench_streaming.wr_u8",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 25
+    },
+    {
+      "id": "func:benchmarks/bench_streaming.c:write_synth",
+      "kind": "function",
+      "name": "write_synth",
+      "qualified_name": "benchmarks.bench_streaming.write_synth",
+      "path": "benchmarks/bench_streaming.c",
+      "line": 32
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_chat_stream",
+      "kind": "function",
+      "name": "ct_agent_chat_stream",
+      "qualified_name": "src.agent.agent.ct_agent_chat_stream",
+      "path": "src/agent/agent.c",
+      "line": 263
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_destroy",
+      "kind": "function",
+      "name": "ct_agent_destroy",
+      "qualified_name": "src.agent.agent.ct_agent_destroy",
+      "path": "src/agent/agent.c",
+      "line": 154
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_memory_entries",
+      "kind": "function",
+      "name": "ct_agent_memory_entries",
+      "qualified_name": "src.agent.agent.ct_agent_memory_entries",
+      "path": "src/agent/agent.c",
+      "line": 312
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_memory_trace",
+      "kind": "function",
+      "name": "ct_agent_memory_trace",
+      "qualified_name": "src.agent.agent.ct_agent_memory_trace",
+      "path": "src/agent/agent.c",
+      "line": 318
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_reset_session",
+      "kind": "function",
+      "name": "ct_agent_reset_session",
+      "qualified_name": "src.agent.agent.ct_agent_reset_session",
+      "path": "src/agent/agent.c",
+      "line": 292
+    },
+    {
+      "id": "func:src/agent/agent.c:ct_agent_turn_count",
+      "kind": "function",
+      "name": "ct_agent_turn_count",
+      "qualified_name": "src.agent.agent.ct_agent_turn_count",
+      "path": "src/agent/agent.c",
+      "line": 300
+    },
+    {
+      "id": "func:src/agent/agent.c:now_ms",
+      "kind": "function",
+      "name": "now_ms",
+      "qualified_name": "src.agent.agent.now_ms",
+      "path": "src/agent/agent.c",
+      "line": 38
+    },
+    {
+      "id": "func:src/agent/agent.c:turn_free",
+      "kind": "function",
+      "name": "turn_free",
+      "qualified_name": "src.agent.agent.turn_free",
+      "path": "src/agent/agent.c",
+      "line": 42
+    },
+    {
+      "id": "func:src/agent/agent.c:turn_push",
+      "kind": "function",
+      "name": "turn_push",
+      "qualified_name": "src.agent.agent.turn_push",
+      "path": "src/agent/agent.c",
+      "line": 47
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_chat_stream",
+      "kind": "function",
+      "name": "ct_agent_chat_stream",
+      "qualified_name": "src.agent.agent.ct_agent_chat_stream",
+      "path": "src/agent/agent.h",
+      "line": 76
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_destroy",
+      "kind": "function",
+      "name": "ct_agent_destroy",
+      "qualified_name": "src.agent.agent.ct_agent_destroy",
+      "path": "src/agent/agent.h",
+      "line": 66
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_memory_entries",
+      "kind": "function",
+      "name": "ct_agent_memory_entries",
+      "qualified_name": "src.agent.agent.ct_agent_memory_entries",
+      "path": "src/agent/agent.h",
+      "line": 91
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_memory_trace",
+      "kind": "function",
+      "name": "ct_agent_memory_trace",
+      "qualified_name": "src.agent.agent.ct_agent_memory_trace",
+      "path": "src/agent/agent.h",
+      "line": 92
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_reset_session",
+      "kind": "function",
+      "name": "ct_agent_reset_session",
+      "qualified_name": "src.agent.agent.ct_agent_reset_session",
+      "path": "src/agent/agent.h",
+      "line": 84
+    },
+    {
+      "id": "func:src/agent/agent.h:ct_agent_turn_count",
+      "kind": "function",
+      "name": "ct_agent_turn_count",
+      "qualified_name": "src.agent.agent.ct_agent_turn_count",
+      "path": "src/agent/agent.h",
+      "line": 85
     },
     {
       "id": "func:src/attention/attention.c:ct_attn_forward",
@@ -2621,6 +3013,14 @@
       "line": 200
     },
     {
+      "id": "func:src/engine/engine.c:ct_engine_generate_stream",
+      "kind": "function",
+      "name": "ct_engine_generate_stream",
+      "qualified_name": "src.engine.engine.ct_engine_generate_stream",
+      "path": "src/engine/engine.c",
+      "line": 301
+    },
+    {
       "id": "func:src/engine/engine.c:ct_engine_is_loaded",
       "kind": "function",
       "name": "ct_engine_is_loaded",
@@ -2634,7 +3034,7 @@
       "name": "ct_engine_is_streaming",
       "qualified_name": "src.engine.engine.ct_engine_is_streaming",
       "path": "src/engine/engine.c",
-      "line": 352
+      "line": 424
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_kv_load",
@@ -2642,7 +3042,7 @@
       "name": "ct_engine_kv_load",
       "qualified_name": "src.engine.engine.ct_engine_kv_load",
       "path": "src/engine/engine.c",
-      "line": 316
+      "line": 388
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_kv_reset",
@@ -2650,7 +3050,7 @@
       "name": "ct_engine_kv_reset",
       "qualified_name": "src.engine.engine.ct_engine_kv_reset",
       "path": "src/engine/engine.c",
-      "line": 301
+      "line": 373
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_kv_reuse",
@@ -2658,7 +3058,7 @@
       "name": "ct_engine_kv_reuse",
       "qualified_name": "src.engine.engine.ct_engine_kv_reuse",
       "path": "src/engine/engine.c",
-      "line": 326
+      "line": 398
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_kv_save",
@@ -2666,7 +3066,7 @@
       "name": "ct_engine_kv_save",
       "qualified_name": "src.engine.engine.ct_engine_kv_save",
       "path": "src/engine/engine.c",
-      "line": 307
+      "line": 379
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_load",
@@ -2682,7 +3082,7 @@
       "name": "ct_engine_memory_budget",
       "qualified_name": "src.engine.engine.ct_engine_memory_budget",
       "path": "src/engine/engine.c",
-      "line": 344
+      "line": 416
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_memory_used",
@@ -2690,7 +3090,7 @@
       "name": "ct_engine_memory_used",
       "qualified_name": "src.engine.engine.ct_engine_memory_used",
       "path": "src/engine/engine.c",
-      "line": 334
+      "line": 406
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_streaming_cache_hits",
@@ -2698,7 +3098,7 @@
       "name": "ct_engine_streaming_cache_hits",
       "qualified_name": "src.engine.engine.ct_engine_streaming_cache_hits",
       "path": "src/engine/engine.c",
-      "line": 356
+      "line": 428
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_streaming_cache_misses",
@@ -2706,7 +3106,7 @@
       "name": "ct_engine_streaming_cache_misses",
       "qualified_name": "src.engine.engine.ct_engine_streaming_cache_misses",
       "path": "src/engine/engine.c",
-      "line": 359
+      "line": 431
     },
     {
       "id": "func:src/engine/engine.c:ct_engine_supports_backend",
@@ -2731,6 +3131,14 @@
       "qualified_name": "src.engine.engine.ct_engine_unload",
       "path": "src/engine/engine.c",
       "line": 150
+    },
+    {
+      "id": "func:src/engine/engine.h:bool",
+      "kind": "function",
+      "name": "bool",
+      "qualified_name": "src.engine.engine.bool",
+      "path": "src/engine/engine.h",
+      "line": 144
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_destroy",
@@ -2773,6 +3181,14 @@
       "line": 133
     },
     {
+      "id": "func:src/engine/engine.h:ct_engine_generate_stream",
+      "kind": "function",
+      "name": "ct_engine_generate_stream",
+      "qualified_name": "src.engine.engine.ct_engine_generate_stream",
+      "path": "src/engine/engine.h",
+      "line": 146
+    },
+    {
       "id": "func:src/engine/engine.h:ct_engine_is_loaded",
       "kind": "function",
       "name": "ct_engine_is_loaded",
@@ -2786,7 +3202,7 @@
       "name": "ct_engine_is_streaming",
       "qualified_name": "src.engine.engine.ct_engine_is_streaming",
       "path": "src/engine/engine.h",
-      "line": 152
+      "line": 164
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_kv_load",
@@ -2794,7 +3210,7 @@
       "name": "ct_engine_kv_load",
       "qualified_name": "src.engine.engine.ct_engine_kv_load",
       "path": "src/engine/engine.h",
-      "line": 144
+      "line": 156
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_kv_reset",
@@ -2802,7 +3218,7 @@
       "name": "ct_engine_kv_reset",
       "qualified_name": "src.engine.engine.ct_engine_kv_reset",
       "path": "src/engine/engine.h",
-      "line": 142
+      "line": 154
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_kv_reuse",
@@ -2810,7 +3226,7 @@
       "name": "ct_engine_kv_reuse",
       "qualified_name": "src.engine.engine.ct_engine_kv_reuse",
       "path": "src/engine/engine.h",
-      "line": 145
+      "line": 157
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_kv_save",
@@ -2818,7 +3234,7 @@
       "name": "ct_engine_kv_save",
       "qualified_name": "src.engine.engine.ct_engine_kv_save",
       "path": "src/engine/engine.h",
-      "line": 143
+      "line": 155
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_load",
@@ -2834,7 +3250,7 @@
       "name": "ct_engine_memory_budget",
       "qualified_name": "src.engine.engine.ct_engine_memory_budget",
       "path": "src/engine/engine.h",
-      "line": 151
+      "line": 163
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_memory_used",
@@ -2842,7 +3258,7 @@
       "name": "ct_engine_memory_used",
       "qualified_name": "src.engine.engine.ct_engine_memory_used",
       "path": "src/engine/engine.h",
-      "line": 150
+      "line": 162
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_streaming_cache_hits",
@@ -2850,7 +3266,7 @@
       "name": "ct_engine_streaming_cache_hits",
       "qualified_name": "src.engine.engine.ct_engine_streaming_cache_hits",
       "path": "src/engine/engine.h",
-      "line": 153
+      "line": 165
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_streaming_cache_misses",
@@ -2858,7 +3274,7 @@
       "name": "ct_engine_streaming_cache_misses",
       "qualified_name": "src.engine.engine.ct_engine_streaming_cache_misses",
       "path": "src/engine/engine.h",
-      "line": 154
+      "line": 166
     },
     {
       "id": "func:src/engine/engine.h:ct_engine_supports_backend",
@@ -3685,6 +4101,214 @@
       "line": 49
     },
     {
+      "id": "func:src/server/server.c:create_listen_socket",
+      "kind": "function",
+      "name": "create_listen_socket",
+      "qualified_name": "src.server.server.create_listen_socket",
+      "path": "src/server/server.c",
+      "line": 78
+    },
+    {
+      "id": "func:src/server/server.c:ct_server_destroy",
+      "kind": "function",
+      "name": "ct_server_destroy",
+      "qualified_name": "src.server.server.ct_server_destroy",
+      "path": "src/server/server.c",
+      "line": 449
+    },
+    {
+      "id": "func:src/server/server.c:ct_server_get_stats",
+      "kind": "function",
+      "name": "ct_server_get_stats",
+      "qualified_name": "src.server.server.ct_server_get_stats",
+      "path": "src/server/server.c",
+      "line": 509
+    },
+    {
+      "id": "func:src/server/server.c:ct_server_is_running",
+      "kind": "function",
+      "name": "ct_server_is_running",
+      "qualified_name": "src.server.server.ct_server_is_running",
+      "path": "src/server/server.c",
+      "line": 505
+    },
+    {
+      "id": "func:src/server/server.c:ct_server_start",
+      "kind": "function",
+      "name": "ct_server_start",
+      "qualified_name": "src.server.server.ct_server_start",
+      "path": "src/server/server.c",
+      "line": 458
+    },
+    {
+      "id": "func:src/server/server.c:ct_server_stop",
+      "kind": "function",
+      "name": "ct_server_stop",
+      "qualified_name": "src.server.server.ct_server_stop",
+      "path": "src/server/server.c",
+      "line": 496
+    },
+    {
+      "id": "func:src/server/server.c:handle_completions",
+      "kind": "function",
+      "name": "handle_completions",
+      "qualified_name": "src.server.server.handle_completions",
+      "path": "src/server/server.c",
+      "line": 290
+    },
+    {
+      "id": "func:src/server/server.c:handle_connection",
+      "kind": "function",
+      "name": "handle_connection",
+      "qualified_name": "src.server.server.handle_connection",
+      "path": "src/server/server.c",
+      "line": 388
+    },
+    {
+      "id": "func:src/server/server.c:handle_health",
+      "kind": "function",
+      "name": "handle_health",
+      "qualified_name": "src.server.server.handle_health",
+      "path": "src/server/server.c",
+      "line": 271
+    },
+    {
+      "id": "func:src/server/server.c:handle_models",
+      "kind": "function",
+      "name": "handle_models",
+      "qualified_name": "src.server.server.handle_models",
+      "path": "src/server/server.c",
+      "line": 280
+    },
+    {
+      "id": "func:src/server/server.c:json_escape",
+      "kind": "function",
+      "name": "json_escape",
+      "qualified_name": "src.server.server.json_escape",
+      "path": "src/server/server.c",
+      "line": 109
+    },
+    {
+      "id": "func:src/server/server.c:json_get_bool",
+      "kind": "function",
+      "name": "json_get_bool",
+      "qualified_name": "src.server.server.json_get_bool",
+      "path": "src/server/server.c",
+      "line": 256
+    },
+    {
+      "id": "func:src/server/server.c:json_get_int",
+      "kind": "function",
+      "name": "json_get_int",
+      "qualified_name": "src.server.server.json_get_int",
+      "path": "src/server/server.c",
+      "line": 241
+    },
+    {
+      "id": "func:src/server/server.c:json_get_str",
+      "kind": "function",
+      "name": "json_get_str",
+      "qualified_name": "src.server.server.json_get_str",
+      "path": "src/server/server.c",
+      "line": 223
+    },
+    {
+      "id": "func:src/server/server.c:parse_request",
+      "kind": "function",
+      "name": "parse_request",
+      "qualified_name": "src.server.server.parse_request",
+      "path": "src/server/server.c",
+      "line": 197
+    },
+    {
+      "id": "func:src/server/server.c:platform_cleanup",
+      "kind": "function",
+      "name": "platform_cleanup",
+      "qualified_name": "src.server.server.platform_cleanup",
+      "path": "src/server/server.c",
+      "line": 72
+    },
+    {
+      "id": "func:src/server/server.c:platform_init",
+      "kind": "function",
+      "name": "platform_init",
+      "qualified_name": "src.server.server.platform_init",
+      "path": "src/server/server.c",
+      "line": 63
+    },
+    {
+      "id": "func:src/server/server.c:send_error",
+      "kind": "function",
+      "name": "send_error",
+      "qualified_name": "src.server.server.send_error",
+      "path": "src/server/server.c",
+      "line": 148
+    },
+    {
+      "id": "func:src/server/server.c:send_json",
+      "kind": "function",
+      "name": "send_json",
+      "qualified_name": "src.server.server.send_json",
+      "path": "src/server/server.c",
+      "line": 144
+    },
+    {
+      "id": "func:src/server/server.c:send_response",
+      "kind": "function",
+      "name": "send_response",
+      "qualified_name": "src.server.server.send_response",
+      "path": "src/server/server.c",
+      "line": 127
+    },
+    {
+      "id": "func:src/server/server.c:stream_callback",
+      "kind": "function",
+      "name": "stream_callback",
+      "qualified_name": "src.server.server.stream_callback",
+      "path": "src/server/server.c",
+      "line": 167
+    },
+    {
+      "id": "func:src/server/server.h:ct_server_destroy",
+      "kind": "function",
+      "name": "ct_server_destroy",
+      "qualified_name": "src.server.server.ct_server_destroy",
+      "path": "src/server/server.h",
+      "line": 51
+    },
+    {
+      "id": "func:src/server/server.h:ct_server_get_stats",
+      "kind": "function",
+      "name": "ct_server_get_stats",
+      "qualified_name": "src.server.server.ct_server_get_stats",
+      "path": "src/server/server.h",
+      "line": 72
+    },
+    {
+      "id": "func:src/server/server.h:ct_server_is_running",
+      "kind": "function",
+      "name": "ct_server_is_running",
+      "qualified_name": "src.server.server.ct_server_is_running",
+      "path": "src/server/server.h",
+      "line": 60
+    },
+    {
+      "id": "func:src/server/server.h:ct_server_start",
+      "kind": "function",
+      "name": "ct_server_start",
+      "qualified_name": "src.server.server.ct_server_start",
+      "path": "src/server/server.h",
+      "line": 54
+    },
+    {
+      "id": "func:src/server/server.h:ct_server_stop",
+      "kind": "function",
+      "name": "ct_server_stop",
+      "qualified_name": "src.server.server.ct_server_stop",
+      "path": "src/server/server.h",
+      "line": 57
+    },
+    {
       "id": "func:src/speculative/speculative.c:ct_spec_destroy",
       "kind": "function",
       "name": "ct_spec_destroy",
@@ -4101,6 +4725,326 @@
       "line": 40
     },
     {
+      "id": "func:tests/integration/agent_e2e_test.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "tests.integration.agent_e2e_test.main",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 187
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:scb",
+      "kind": "function",
+      "name": "scb",
+      "qualified_name": "tests.integration.agent_e2e_test.scb",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 60
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:test_agent_create_destroy",
+      "kind": "function",
+      "name": "test_agent_create_destroy",
+      "qualified_name": "tests.integration.agent_e2e_test.test_agent_create_destroy",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 67
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:test_agent_history_eviction",
+      "kind": "function",
+      "name": "test_agent_history_eviction",
+      "qualified_name": "tests.integration.agent_e2e_test.test_agent_history_eviction",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 164
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:test_agent_multi_turn",
+      "kind": "function",
+      "name": "test_agent_multi_turn",
+      "qualified_name": "tests.integration.agent_e2e_test.test_agent_multi_turn",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 82
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:test_agent_reset",
+      "kind": "function",
+      "name": "test_agent_reset",
+      "qualified_name": "tests.integration.agent_e2e_test.test_agent_reset",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 120
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:test_agent_stream",
+      "kind": "function",
+      "name": "test_agent_stream",
+      "qualified_name": "tests.integration.agent_e2e_test.test_agent_stream",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 145
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_f32",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 28
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_str",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 27
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_ti",
+      "kind": "function",
+      "name": "wr_ti",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_ti",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 29
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_u32",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 24
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_u64",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 26
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "tests.integration.agent_e2e_test.wr_u8",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 25
+    },
+    {
+      "id": "func:tests/integration/agent_e2e_test.c:write_synth",
+      "kind": "function",
+      "name": "write_synth",
+      "qualified_name": "tests.integration.agent_e2e_test.write_synth",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 32
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "tests.integration.core_engine_test.main",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 181
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:test_engine_and_waste_combined",
+      "kind": "function",
+      "name": "test_engine_and_waste_combined",
+      "qualified_name": "tests.integration.core_engine_test.test_engine_and_waste_combined",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 107
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:test_policy_default",
+      "kind": "function",
+      "name": "test_policy_default",
+      "qualified_name": "tests.integration.core_engine_test.test_policy_default",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 171
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:test_waste_engine_lifecycle",
+      "kind": "function",
+      "name": "test_waste_engine_lifecycle",
+      "qualified_name": "tests.integration.core_engine_test.test_waste_engine_lifecycle",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 60
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:test_waste_solve",
+      "kind": "function",
+      "name": "test_waste_solve",
+      "qualified_name": "tests.integration.core_engine_test.test_waste_solve",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 83
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "tests.integration.core_engine_test.wr_f32",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 29
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "tests.integration.core_engine_test.wr_str",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 28
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_ti",
+      "kind": "function",
+      "name": "wr_ti",
+      "qualified_name": "tests.integration.core_engine_test.wr_ti",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 30
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "tests.integration.core_engine_test.wr_u32",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 25
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "tests.integration.core_engine_test.wr_u64",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 27
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "tests.integration.core_engine_test.wr_u8",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 26
+    },
+    {
+      "id": "func:tests/integration/core_engine_test.c:write_synth",
+      "kind": "function",
+      "name": "write_synth",
+      "qualified_name": "tests.integration.core_engine_test.write_synth",
+      "path": "tests/integration/core_engine_test.c",
+      "line": 33
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:abort_callback",
+      "kind": "function",
+      "name": "abort_callback",
+      "qualified_name": "tests.integration.streaming_engine_test.abort_callback",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 76
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:count_callback",
+      "kind": "function",
+      "name": "count_callback",
+      "qualified_name": "tests.integration.streaming_engine_test.count_callback",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 65
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "tests.integration.streaming_engine_test.main",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 127
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:test_stream_abort",
+      "kind": "function",
+      "name": "test_stream_abort",
+      "qualified_name": "tests.integration.streaming_engine_test.test_stream_abort",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 100
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:test_stream_basic",
+      "kind": "function",
+      "name": "test_stream_basic",
+      "qualified_name": "tests.integration.streaming_engine_test.test_stream_basic",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 87
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:test_stream_empty_prompt",
+      "kind": "function",
+      "name": "test_stream_empty_prompt",
+      "qualified_name": "tests.integration.streaming_engine_test.test_stream_empty_prompt",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 118
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:test_stream_null_callback",
+      "kind": "function",
+      "name": "test_stream_null_callback",
+      "qualified_name": "tests.integration.streaming_engine_test.test_stream_null_callback",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 111
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_f32",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 27
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_str",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 26
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_ti",
+      "kind": "function",
+      "name": "wr_ti",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_ti",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 28
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_u32",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 23
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_u64",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 25
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "tests.integration.streaming_engine_test.wr_u8",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 24
+    },
+    {
+      "id": "func:tests/integration/streaming_engine_test.c:write_synth",
+      "kind": "function",
+      "name": "write_synth",
+      "qualified_name": "tests.integration.streaming_engine_test.write_synth",
+      "path": "tests/integration/streaming_engine_test.c",
+      "line": 31
+    },
+    {
       "id": "func:tests/unit/attention_test.c:main",
       "kind": "function",
       "name": "main",
@@ -4389,6 +5333,78 @@
       "line": 20
     },
     {
+      "id": "func:tools/vivy.c:main",
+      "kind": "function",
+      "name": "main",
+      "qualified_name": "tools.vivy.main",
+      "path": "tools/vivy.c",
+      "line": 53
+    },
+    {
+      "id": "func:tools/vivy.c:wr_f32",
+      "kind": "function",
+      "name": "wr_f32",
+      "qualified_name": "tools.vivy.wr_f32",
+      "path": "tools/vivy.c",
+      "line": 18
+    },
+    {
+      "id": "func:tools/vivy.c:wr_str",
+      "kind": "function",
+      "name": "wr_str",
+      "qualified_name": "tools.vivy.wr_str",
+      "path": "tools/vivy.c",
+      "line": 17
+    },
+    {
+      "id": "func:tools/vivy.c:wr_tensor_info",
+      "kind": "function",
+      "name": "wr_tensor_info",
+      "qualified_name": "tools.vivy.wr_tensor_info",
+      "path": "tools/vivy.c",
+      "line": 19
+    },
+    {
+      "id": "func:tools/vivy.c:wr_u32",
+      "kind": "function",
+      "name": "wr_u32",
+      "qualified_name": "tools.vivy.wr_u32",
+      "path": "tools/vivy.c",
+      "line": 14
+    },
+    {
+      "id": "func:tools/vivy.c:wr_u64",
+      "kind": "function",
+      "name": "wr_u64",
+      "qualified_name": "tools.vivy.wr_u64",
+      "path": "tools/vivy.c",
+      "line": 16
+    },
+    {
+      "id": "func:tools/vivy.c:wr_u8",
+      "kind": "function",
+      "name": "wr_u8",
+      "qualified_name": "tools.vivy.wr_u8",
+      "path": "tools/vivy.c",
+      "line": 15
+    },
+    {
+      "id": "func:tools/vivy.c:write_synth_gguf",
+      "kind": "function",
+      "name": "write_synth_gguf",
+      "qualified_name": "tools.vivy.write_synth_gguf",
+      "path": "tools/vivy.c",
+      "line": 24
+    },
+    {
+      "id": "struct:src/agent/agent.c:ct_agent",
+      "kind": "struct",
+      "name": "ct_agent",
+      "qualified_name": "src.agent.agent.ct_agent",
+      "path": "src/agent/agent.c",
+      "line": 21
+    },
+    {
       "id": "struct:src/backend/backend.c:ct_backend",
       "kind": "struct",
       "name": "ct_backend",
@@ -4541,6 +5557,14 @@
       "line": 12
     },
     {
+      "id": "struct:src/server/server.c:ct_server",
+      "kind": "struct",
+      "name": "ct_server",
+      "qualified_name": "src.server.server.ct_server",
+      "path": "src/server/server.c",
+      "line": 52
+    },
+    {
       "id": "struct:src/speculative/speculative.c:ct_spec_ctx",
       "kind": "struct",
       "name": "ct_spec_ctx",
@@ -4579,6 +5603,22 @@
       "qualified_name": "src.transformer.transformer.ct_transformer",
       "path": "src/transformer/transformer.c",
       "line": 12
+    },
+    {
+      "id": "type:benchmarks/bench_engine.c:n",
+      "kind": "typedef",
+      "name": "n",
+      "qualified_name": "benchmarks.bench_engine.n",
+      "path": "benchmarks/bench_engine.c",
+      "line": 27
+    },
+    {
+      "id": "type:src/agent/agent.h:ct_agent_t",
+      "kind": "typedef",
+      "name": "ct_agent_t",
+      "qualified_name": "src.agent.agent.ct_agent_t",
+      "path": "src/agent/agent.h",
+      "line": 44
     },
     {
       "id": "type:src/backend/backend.h:ct_backend_t",
@@ -4757,6 +5797,22 @@
       "line": 22
     },
     {
+      "id": "type:src/server/server.c:ct_sock_t",
+      "kind": "typedef",
+      "name": "ct_sock_t",
+      "qualified_name": "src.server.server.ct_sock_t",
+      "path": "src/server/server.c",
+      "line": 38
+    },
+    {
+      "id": "type:src/server/server.h:ct_server_t",
+      "kind": "typedef",
+      "name": "ct_server_t",
+      "qualified_name": "src.server.server.ct_server_t",
+      "path": "src/server/server.h",
+      "line": 33
+    },
+    {
       "id": "type:src/speculative/speculative.h:ct_spec_ctx_t",
       "kind": "typedef",
       "name": "ct_spec_ctx_t",
@@ -4787,9 +5843,227 @@
       "qualified_name": "src.transformer.transformer.ct_transformer_t",
       "path": "src/transformer/transformer.h",
       "line": 23
+    },
+    {
+      "id": "type:tests/integration/agent_e2e_test.c:tokens",
+      "kind": "typedef",
+      "name": "tokens",
+      "qualified_name": "tests.integration.agent_e2e_test.tokens",
+      "path": "tests/integration/agent_e2e_test.c",
+      "line": 59
     }
   ],
   "edges": [
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:now_sec",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:row",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:scb_fn",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:sep",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_ti",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "func:benchmarks/bench_engine.c:write_synth",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "type:benchmarks/bench_engine.c:n",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:bench_generate",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:hdr",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:now_sec",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:sep",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_ti",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "func:benchmarks/bench_streaming.c:write_synth",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_chat_stream",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_destroy",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_memory_entries",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_memory_trace",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_reset_session",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:ct_agent_turn_count",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:now_ms",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:turn_free",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "func:src/agent/agent.c:turn_push",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "struct:src/agent/agent.c:ct_agent",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_chat_stream",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_destroy",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_memory_entries",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_memory_trace",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_reset_session",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "func:src/agent/agent.h:ct_agent_turn_count",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "type:src/agent/agent.h:ct_agent_t",
+      "kind": "contains"
+    },
     {
       "source": "file:src/attention/attention.c",
       "target": "func:src/attention/attention.c:ct_attn_forward",
@@ -6247,6 +7521,11 @@
     },
     {
       "source": "file:src/engine/engine.c",
+      "target": "func:src/engine/engine.c:ct_engine_generate_stream",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/engine/engine.c",
       "target": "func:src/engine/engine.c:ct_engine_is_loaded",
       "kind": "contains"
     },
@@ -6322,6 +7601,11 @@
     },
     {
       "source": "file:src/engine/engine.h",
+      "target": "func:src/engine/engine.h:bool",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/engine/engine.h",
       "target": "func:src/engine/engine.h:ct_engine_destroy",
       "kind": "contains"
     },
@@ -6343,6 +7627,11 @@
     {
       "source": "file:src/engine/engine.h",
       "target": "func:src/engine/engine.h:ct_engine_generate",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/engine/engine.h",
+      "target": "func:src/engine/engine.h:ct_engine_generate_stream",
       "kind": "contains"
     },
     {
@@ -6941,6 +8230,151 @@
       "kind": "contains"
     },
     {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:create_listen_socket",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:ct_server_destroy",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:ct_server_get_stats",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:ct_server_is_running",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:ct_server_start",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:ct_server_stop",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:handle_completions",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:handle_connection",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:handle_health",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:handle_models",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:json_escape",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:json_get_bool",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:json_get_int",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:json_get_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:parse_request",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:platform_cleanup",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:platform_init",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:send_error",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:send_json",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:send_response",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "func:src/server/server.c:stream_callback",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "struct:src/server/server.c:ct_server",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "type:src/server/server.c:ct_sock_t",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "func:src/server/server.h:ct_server_destroy",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "func:src/server/server.h:ct_server_get_stats",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "func:src/server/server.h:ct_server_is_running",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "func:src/server/server.h:ct_server_start",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "func:src/server/server.h:ct_server_stop",
+      "kind": "contains"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "type:src/server/server.h:ct_server_t",
+      "kind": "contains"
+    },
+    {
       "source": "file:src/speculative/speculative.c",
       "target": "func:src/speculative/speculative.c:ct_spec_destroy",
       "kind": "contains"
@@ -7246,6 +8680,211 @@
       "kind": "contains"
     },
     {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:scb",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:test_agent_create_destroy",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:test_agent_history_eviction",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:test_agent_multi_turn",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:test_agent_reset",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:test_agent_stream",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_ti",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "func:tests/integration/agent_e2e_test.c:write_synth",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "type:tests/integration/agent_e2e_test.c:tokens",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:test_engine_and_waste_combined",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:test_policy_default",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:test_waste_engine_lifecycle",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:test_waste_solve",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_ti",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "func:tests/integration/core_engine_test.c:write_synth",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:abort_callback",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:count_callback",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:test_stream_abort",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:test_stream_basic",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:test_stream_empty_prompt",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:test_stream_null_callback",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_ti",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "func:tests/integration/streaming_engine_test.c:write_synth",
+      "kind": "contains"
+    },
+    {
       "source": "file:tests/unit/attention_test.c",
       "target": "func:tests/unit/attention_test.c:main",
       "kind": "contains"
@@ -7424,6 +9063,161 @@
       "source": "file:tests/unit/verification_test.c",
       "target": "func:tests/unit/verification_test.c:main",
       "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:main",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_f32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_str",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_tensor_info",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_u32",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_u64",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:wr_u8",
+      "kind": "contains"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "func:tools/vivy.c:write_synth_gguf",
+      "kind": "contains"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:math.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_engine.c",
+      "target": "include:time.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:math.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:streaming/streaming.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:benchmarks/bench_streaming.c",
+      "target": "include:time.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "include:agent/agent.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.c",
+      "target": "include:time.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "include:core/core.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "include:stdbool.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "include:stddef.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/agent/agent.h",
+      "target": "include:stdint.h",
+      "kind": "includes"
     },
     {
       "source": "file:src/attention/attention.c",
@@ -8266,6 +10060,91 @@
       "kind": "includes"
     },
     {
+      "source": "file:src/server/server.c",
+      "target": "include:arpa/inet.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:errno.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:fcntl.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:netinet/in.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:server/server.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:stdarg.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:sys/socket.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:unistd.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:winsock2.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.c",
+      "target": "include:ws2tcpip.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "include:stdbool.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "include:stddef.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:src/server/server.h",
+      "target": "include:stdint.h",
+      "kind": "includes"
+    },
+    {
       "source": "file:src/speculative/speculative.c",
       "target": "include:speculative/speculative.h",
       "kind": "includes"
@@ -8423,6 +10302,91 @@
     {
       "source": "file:src/transformer/transformer.h",
       "target": "include:stdint.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:agent/agent.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:core/core.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/agent_e2e_test.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:core/core.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:math.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/core_engine_test.c",
+      "target": "include:string.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "include:math.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tests/integration/streaming_engine_test.c",
+      "target": "include:string.h",
       "kind": "includes"
     },
     {
@@ -8838,6 +10802,31 @@
     {
       "source": "file:tests/unit/verification_test.c",
       "target": "include:verification/verification.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "include:engine/engine.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "include:math.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "include:stdio.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "include:stdlib.h",
+      "kind": "includes"
+    },
+    {
+      "source": "file:tools/vivy.c",
+      "target": "include:string.h",
       "kind": "includes"
     }
   ],
