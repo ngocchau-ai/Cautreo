@@ -70,14 +70,14 @@ waste_engine_t *engine_create(const policy_t *policy) {
 
 void engine_destroy(waste_engine_t *engine) {
     if (!engine) return;
-    population_destroy(engine->population);
-    memory_destroy(engine->memory);
-    observer_destroy(engine->observer);
-    grassmann_destroy(engine->grassmann);
-    gateway_destroy(engine->gateway);
-    router_destroy(engine->router);
-    planner_destroy(engine->planner);
-    funnel_destroy(engine->funnel);
+    if (engine->population) population_destroy(engine->population);
+    if (engine->memory)     memory_destroy(engine->memory);
+    if (engine->observer)   observer_destroy(engine->observer);
+    if (engine->grassmann)  grassmann_destroy(engine->grassmann);
+    if (engine->gateway)    gateway_destroy(engine->gateway);
+    if (engine->router)     router_destroy(engine->router);
+    if (engine->planner)    planner_destroy(engine->planner);
+    if (engine->funnel)     funnel_destroy(engine->funnel);
     for (size_t i = 0; i < engine->history_count; i++)
         transition_record_free(engine->history[i]);
     free(engine->history);

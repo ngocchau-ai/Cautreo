@@ -61,6 +61,7 @@ typedef enum {
     GGML_TYPE_IQ4_NL_4_4 = 36,
     GGML_TYPE_IQ4_NL_4_8 = 37,
     GGML_TYPE_IQ4_NL_8_8 = 38,
+    GGML_TYPE_MXFP4     = 39,  /* MX Float 4-bit (bartowski DeepSeek-V4-Flash-0731) */
 } ggml_type_t;
 
 /* GGUF value types (metadata KV) */
@@ -145,6 +146,45 @@ uint32_t gguf_n_head(const gguf_file_t *g);
 uint32_t gguf_n_head_kv(const gguf_file_t *g);
 uint32_t gguf_n_ctx(const gguf_file_t *g);
 uint32_t gguf_n_experts(const gguf_file_t *g);
+
+/* ---------------------------------------------------------------------------
+ * Split GGUF — multi-part support (e.g. DeepSeek-V4-Flash 4-part MXFP4)
+ *
+ * Usage:
+ *   const char *parts[] = { "part1.gguf", "part2.gguf", ... };
+ *   gguf_split_t *s = gguf_split_open(parts, 4);
+ *   gguf_split_read_tensor(s, "blk.0.attn_k.weight", buf, sz);
+ *   gguf_split_close(s);
+ * ------------------------------------------------------------------------- */
+typedef struct gguf_split_s gguf_split_t;
+
+/* Open n_parts GGUF files and merge their tensor indexes.
+ * Metadata (hyperparams) is taken from part 0 (primary). */
+gguf_split_t      *gguf_split_open(const char **paths, int n_parts);
+void               gguf_split_close(gguf_split_t *s);
+
+/* Access the primary (part 0) gguf_file_t for metadata. */
+const gguf_file_t *gguf_split_primary(const gguf_split_t *s);
+
+/* Total tensor count across all parts. */
+uint64_t           gguf_split_n_tensors(const gguf_split_t *s);
+
+/* Find a tensor info across all parts (returns NULL if not found). */
+const gguf_tensor_info_t *gguf_split_find_tensor(const gguf_split_t *s,
+                                                  const char *name);
+
+/* Lazy read: read tensor data from whichever part contains it. */
+bool gguf_split_read_tensor(const gguf_split_t *s, const char *name,
+                             void *dst, size_t dst_size);
+bool gguf_split_read_tensor_at(const gguf_split_t *s, const char *name,
+                                void *dst, size_t dst_size,
+                                uint64_t byte_offset);
+
+/* Model param helpers (delegates to primary part). */
+uint32_t gguf_split_n_layers(const gguf_split_t *s);
+uint32_t gguf_split_n_embd(const gguf_split_t *s);
+uint32_t gguf_split_n_experts(const gguf_split_t *s);
+uint32_t gguf_split_n_ctx(const gguf_split_t *s);
 
 #ifdef __cplusplus
 }

@@ -182,12 +182,9 @@ char *ct_agent_chat(ct_agent_t *agent, const char *user_msg) {
                 printf("[agent] WASTE transitions: %zu\n", n_trans);
             }
 
-            /* Free transitions */
-            if (transitions) {
-                for (size_t i = 0; i < n_trans; i++)
-                    transition_record_free(transitions[i]);
-                free(transitions);
-            }
+            /* Note: transitions is engine->history (owned by waste engine).
+             * Do NOT free here — engine_destroy() handles cleanup. */
+            (void)transitions;
             problem_contract_free(contract);
         }
     }

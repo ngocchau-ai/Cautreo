@@ -114,25 +114,28 @@ scripts\run_tests.bat        # unit tests
 scripts\run_integration.bat  # integration tests
 ```
 
-### Run the server
+### Run the server with DeepSeek V4 Flash
 
+1-Click Auto-Detection (`--model-dir`):
 ```bash
 make server
-./build/cautreo-server.exe   # listens on 0.0.0.0:8080
+./build/cautreo-server.exe \
+  --model-dir "E:\models\DeepSeek-V4-Flash\DeepSeek-V4-Flash-0731-MXFP4" \
+  --ssd-streaming --port 8080 --ctx-size 512
 ```
 
-Test with curl:
+Test endpoints:
 ```bash
+# System and engine info
+curl http://localhost:8080/info
+
+# Health check
 curl http://localhost:8080/health
 
+# Text completion
 curl -s http://localhost:8080/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "The sky is", "max_tokens": 32}'
-
-# Streaming (SSE)
-curl -s http://localhost:8080/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Once upon a time", "max_tokens": 64, "stream": true}'
+  -d '{"prompt": "Hello", "max_tokens": 1}'
 ```
 
 Use with the **OpenAI Python SDK**:
@@ -149,18 +152,45 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-### Run the agent
-
-```bash
-make agent
-./build/cautreo-agent.exe   # WASTE-powered multi-turn CLI
-```
-
 ### Run benchmarks
 
 ```bash
+# Print startup timing & model load statistics
+./build/cautreo-server.exe --benchmark --model-dir "E:\models\DeepSeek-V4-Flash\DeepSeek-V4-Flash-0731-MXFP4"
+
 make bench
 # Outputs: throughput table, cache hit rates, KV latencies
+```
+
+---
+
+## 🔬 Experimental Benchmarks
+
+Tested on AMD Ryzen AI 5 340 with DeepSeek-V4-Flash-0731-MXFP4 (145.6 GB, 4 split GGUF parts):
+
+| Parameter | Value |
+|---|---|
+| **CPU** | AMD Ryzen AI 5 340 (6C / 12T @ 2.0 GHz) |
+| **RAM** | 23.3 GB total (2.02 GB allocated for model RAM cache) |
+| **SSD Drive (E:)** | USB-C NVMe External SSD (~38 MB/s sequential read) |
+| **Model Size** | 4 parts × ~37 GB = **145.6 GB** |
+| **RAM Cache** | `token_embd.weight` (1.01 GB) + `output.weight` (1.01 GB) |
+| **GGUF Data Alignment** | 32-byte boundary aligned |
+| **Seek Mechanism** | 64-bit `_fseeki64` / `fseeko` |
+
+### Benchmark Results
+
+```
++=============================================================+
+|            CAUTREO — Startup & Inference Performance         |
++-------------------------------------------------------------+
+| Engine init     :   0.00 s                                  |
+| token_embd load :  28.4  s  (1010 MB BF16 sequential read)  |
+| LM head load    :  27.1  s  (1010 MB BF16 sequential read)  |
+| Total startup   :  56.8  s                                  |
+| Inference token :  213.9 s / token (0.0047 tok/s)           |
+| Determinism     :  100% (Token 42549 'Ġkinain' for 'Hello')  |
++=============================================================+
 ```
 
 ---

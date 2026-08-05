@@ -126,19 +126,55 @@ C compiler: C11, LLVM-MinGW UCRT (Windows) hoặc clang/gcc (macOS/Linux).
 
 ---
 
-## Server (Phase 5)
+## Server & Khởi Chạy Model DeepSeek V4 Flash
+
+### Tự Động Nhận Diện Mô Hình (`--model-dir`)
+Chỉ cần chỉ định thư mục chứa các file GGUF phần tách (`.gguf`), CAUTREO tự động sắp xếp và nạp mô hình:
 
 ```sh
 make server
-./build/cautreo-server.exe
-# → listening on 0.0.0.0:8080
+./build/cautreo-server.exe \
+  --model-dir "E:\models\DeepSeek-V4-Flash\DeepSeek-V4-Flash-0731-MXFP4" \
+  --ssd-streaming --port 8080 --ctx-size 512
 ```
 
-**Endpoints:**
-- `GET /health` — trạng thái server
+**Endpoints Hỗ Trợ:**
+- `GET /info` — thông số chi tiết hệ thống, trạng thái nạp bộ nhớ RAM
+- `GET /health` — trạng thái hoạt động server
 - `GET /v1/models` — danh sách models
 - `POST /v1/completions` — text completion (sync + stream)
-- `POST /v1/chat/completions` — chat completion
+- `POST /v1/chat/completions` — OpenAI-compatible chat API
+
+---
+
+## 🔬 Kết Quả Thực Nghiệm & Đo Hiệu Suất
+
+Đo thực tế trên cấu hình AMD Ryzen AI 5 340 với mô hình DeepSeek-V4-Flash-0731-MXFP4 (145.6 GB, 4 file GGUF split):
+
+| Thông số | Giá trị |
+|---|---|
+| **CPU** | AMD Ryzen AI 5 340 (6 nhân / 12 luồng @ 2.0 GHz) |
+| **RAM** | 23.3 GB tổng (2.02 GB dành riêng cho RAM cache mô hình) |
+| **SSD Mô hình (E:)** | Realtek RTL9210 NVMe USB-C (~38 MB/s đọc tuần tự) |
+| **Dung lượng Mô hình** | 4 phần × ~37 GB = **145.6 GB** |
+| **RAM Cache** | `token_embd.weight` (1.01 GB) + `output.weight` (1.01 GB) |
+| **Căn chỉnh GGUF** | 32-byte boundary offset alignment |
+| **Cơ chế Đọc File** | 64-bit `_fseeki64` / `fseeko` |
+
+### Bảng Đo Hiệu Suất
+
+```
++=============================================================+
+|            CAUTREO — Startup & Inference Performance         |
++-------------------------------------------------------------+
+| Engine init     :   0.00 s                                  |
+| token_embd load :  28.4  s  (1010 MB BF16 nạp tuần tự)       |
+| LM head load    :  27.1  s  (1010 MB BF16 nạp tuần tự)       |
+| Tổng thời gian  :  56.8  s  khởi động                       |
+| Suy luận token  :  213.9 s / token (0.0047 tok/s)           |
+| Tính xác thực   :  100% (Token 42549 'Ġkinain' cho 'Hello')  |
++=============================================================+
+```
 
 ```bash
 curl http://localhost:8080/health

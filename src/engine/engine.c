@@ -6,7 +6,10 @@
 
 #include "model/model.h"
 #include "transformer/transformer.h"
+#include "transformer/ds4_forward.h"
+#include "gguf/gguf.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +26,12 @@ struct ct_engine {
     /* GGUF-backed model + transformer (backend = CT_BACKEND_GGUF) */
     ct_model_t        *model;
     ct_transformer_t  *tf;
+
+    /* Split GGUF handle (non-NULL when n_model_parts > 0) */
+    gguf_split_t      *split;
+
+    /* DeepSeek-V4 (deepseek4 arch) direct forward context */
+    ds4_ctx_t         *ds4;
 
     /* KV cache state */
     ct_engine_kv_config_t kv;
@@ -95,6 +104,8 @@ void ct_engine_destroy(ct_engine_t *e) {
     if (!e) return;
     if (e->tf) ct_transformer_free(e->tf);
     if (e->model) ct_model_free(e->model);
+    if (e->ds4) ds4_free(e->ds4);
+    if (e->split) gguf_split_close(e->split);
     free(e->kv_tokens);
     free(e);
 }
@@ -106,6 +117,58 @@ bool ct_engine_load(ct_engine_t *e) {
     if (!e) return false;
     if (e->loaded) return true;
 
+    /* --- Split GGUF path (DeepSeek-V4-Flash multi-part MXFP4) --- */
+    if (e->opts.backend == CT_BACKEND_GGUF &&
+        e->opts.model_parts && e->opts.n_model_parts > 0) {
+
+        e->split = gguf_split_open(e->opts.model_parts, e->opts.n_model_parts);
+        if (!e->split) {
+            fprintf(stderr, "[engine] gguf_split_open failed\n");
+            return false;
+        }
+        const gguf_file_t *primary = gguf_split_primary(e->split);
+        /* Sync model info from primary part metadata */
+        e->info.n_layers  = gguf_n_layers(primary);
+        e->info.n_vocab   = (uint32_t)gguf_get_int(primary, "tokenizer.ggml.tokens", 128256);
+        e->info.n_experts = gguf_n_experts(primary);
+        e->info.n_active_experts = (uint32_t)gguf_get_int(primary, "llama.expert_used_count", 8);
+        e->info.is_moe    = (e->info.n_experts > 0);
+        e->info.n_params  = (uint64_t)gguf_get_int(primary, "general.parameter_count", 0);
+        e->info.model_bytes = gguf_split_n_tensors(e->split) * 4; /* approx */
+        /* KV config from split primary */
+        e->kv.n_layers = e->info.n_layers ? e->info.n_layers : 32;
+        e->kv.n_heads  = gguf_n_head(primary);
+        e->kv.head_dim = (e->kv.n_heads > 0) ?
+            gguf_n_embd(primary) / e->kv.n_heads : 128;
+        e->kv.ctx_size = e->opts.ctx_size ?
+            e->opts.ctx_size : gguf_n_ctx(primary);
+        if (!e->kv.ctx_size) e->kv.ctx_size = 4096;
+        e->kv_cap = e->kv.ctx_size;
+        free(e->kv_tokens);
+        e->kv_tokens = (int32_t *)malloc(e->kv_cap * sizeof(int32_t));
+        if (!e->kv_tokens) { gguf_split_close(e->split); e->split = NULL; return false; }
+        e->kv_len = 0;
+        fprintf(stderr, "[engine] split GGUF loaded: %d parts, %" PRIu64 " tensors, "
+                        "%u layers, %u experts\n",
+                e->opts.n_model_parts, gguf_split_n_tensors(e->split),
+                e->info.n_layers, e->info.n_experts);
+
+        /* If architecture has layers, create ds4_ctx for real inference */
+        if (e->info.n_layers > 0 && e->info.n_experts > 0) {
+            e->ds4 = ds4_create(e->split, (uint32_t)e->kv.ctx_size);
+            if (e->ds4) {
+                fprintf(stderr, "[engine] ds4_ctx created — real inference enabled\n");
+            } else {
+                fprintf(stderr, "[engine] ds4_ctx alloc failed — will use placeholder\n");
+            }
+        }
+
+        e->loaded = true;
+        e->info.is_loaded = true;
+        return true;
+    }
+
+    /* --- Single-file GGUF path --- */
     if (e->opts.backend == CT_BACKEND_GGUF && e->opts.model_path) {
         e->model = ct_model_load(e->opts.model_path);
         if (!e->model || !ct_model_is_loaded(e->model)) {
@@ -205,7 +268,54 @@ bool ct_engine_generate(ct_engine_t *e,
     memset(out, 0, sizeof(*out));
     out->n_prompt_tokens = n_prompt;
 
-    /* GGUF backend: real forward via transformer. */
+    /* DS4 split-GGUF path: real DeepSeek4 MoE inference */
+    if (e->ds4) {
+        ds4_reset(e->ds4);
+        const float *logits = NULL;
+
+        /* Prefill */
+        for (size_t i = 0; i < n_prompt; i++) {
+            logits = ds4_forward(e->ds4, prompt[i], (uint32_t)i);
+            if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = prompt[i];
+        }
+        out->n_prompt_tokens_processed = n_prompt;
+
+        uint32_t gen = max_tokens;
+        if (e->kv_len + gen > e->kv_cap) { gen = (uint32_t)(e->kv_cap - e->kv_len); out->truncated = true; }
+        out->tokens = (int32_t *)malloc((gen ? gen : 1) * sizeof(int32_t));
+        if (!out->tokens) return false;
+
+        for (uint32_t i = 0; i < gen; i++) {
+            int32_t tok = 0;
+            if (logits) {
+                if (temperature <= 0.0f) {
+                    tok = ds4_argmax(logits, e->info.n_vocab ? e->info.n_vocab : 129280);
+                } else {
+                    uint32_t nv = e->info.n_vocab ? e->info.n_vocab : 129280;
+                    float mx = logits[0];
+                    for (uint32_t j = 1; j < nv; j++) if (logits[j] > mx) mx = logits[j];
+                    double sum = 0.0;
+                    float *p = (float *)malloc(nv * sizeof(float));
+                    if (!p) { tok = 0; goto ds4_tok_done; }
+                    for (uint32_t j = 0; j < nv; j++) { p[j] = expf((logits[j] - mx) / temperature); sum += p[j]; }
+                    double r = (double)rand() / (double)RAND_MAX * sum;
+                    double acc = 0.0; tok = 0;
+                    for (uint32_t j = 0; j < nv; j++) { acc += p[j]; if (acc >= r) { tok = (int32_t)j; break; } }
+                    free(p);
+                }
+            }
+            ds4_tok_done:
+            out->tokens[i] = tok;
+            if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = tok;
+            logits = ds4_forward(e->ds4, tok, (uint32_t)e->kv_len - 1);
+        }
+        out->n_tokens = gen;
+        out->n_gen_tokens = gen;
+        out->gen_tps = 0.0;
+        return true;
+    }
+
+    /* GGUF single-file path: real forward via ct_transformer. */
     if (e->tf) {
         ct_transformer_reset(e->tf);
         e->kv_len = 0;

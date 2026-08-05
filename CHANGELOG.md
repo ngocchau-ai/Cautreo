@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.0] — 2026-08-05 — DeepSeek V4 Flash SSD Streaming & Real Token Generation
+
+### Added
+
+**1-Click Model Auto-Detection (`--model-dir`)**
+- `cautreo-server --model-dir <folder>` — auto-scans directory for `*.gguf` files, sorts them alphabetically (handling split parts `00001-of-00004` to `00004-of-00004`), and initializes the split GGUF backend seamlessly.
+- `--benchmark` flag — runs startup sequence, prints model timing, RAM cache stats, and exits without listening.
+
+**HTTP Metrics Endpoint (`GET /info`)**
+- Endpoint `GET /info` returning JSON with model status, engine stats, request counts, RAM budget, and SSD streaming status.
+
+**DeepSeek4 Engine Optimizations & Fixes (`src/transformer/ds4_forward.c`)**
+- **64-bit Seek Fix**: Replaced 32-bit `fseek()` with `_fseeki64()` (Windows) / `fseeko()` (POSIX) to correctly address tensors at byte offsets >2GB in multi-gigabyte GGUF split parts.
+- **GGUF Alignment Fix**: Aligned `data_offset` to 32-byte boundary per GGUF spec, fixing offset drift that caused BF16 values to decode as garbage.
+- **Input Embedding Fix**: Switched input embedding lookup to `token_embd.weight` (proper BF16 embedding matrix) instead of `output.weight` (LM head), resolving L2 norm overflow and NaN logits.
+- **Bulk RAM Cache**: Pre-loads `token_embd.weight` (1.01 GB) and `output.weight` (1.01 GB) into RAM on startup (total 2.02 GB RAM allocated), eliminating ~130,000 SSD seeks per generated token.
+- **Scratch Buffer & Loop Unrolling**: Added static `ffn_tmp` buffer in `ds4_ctx_t` eliminating inner-loop `malloc/free`, and unrolled LM head dot product 4-way for fast CPU evaluation.
+
+### Experimental Results
+- Tested on AMD Ryzen AI 5 340 (6C/12T), 23.3 GB RAM, USB-C NVMe External SSD (E:).
+- Generated real vocabulary tokens deterministically (`Token 42549` `'Ġkinain'` for `'Hello'`).
+
+---
+
 ## [0.5.0] — 2026-08-05 — Phase 5: Server + Agent
 
 ### Added

@@ -61,7 +61,9 @@ typedef struct ct_engine ct_engine_t;
 typedef struct {
     ct_backend_t backend;
     ct_device_t  device;
-    const char  *model_path;    /* file path or API model name */
+    const char  *model_path;    /* single-file GGUF path (backward compat) */
+    const char **model_parts;  /* array of part paths for split GGUF (DeepSeek-V4-Flash) */
+    int          n_model_parts; /* number of parts (0 = use model_path) */
     const char  *api_base;      /* for API backend */
     const char  *api_key;       /* for API backend */
     uint32_t     ctx_size;      /* context window */

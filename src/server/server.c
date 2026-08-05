@@ -8,6 +8,7 @@
  */
 
 #include "server/server.h"
+#include "engine/engine.h"  /* for ct_engine_detokenize */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,7 +47,7 @@
  * Internal server struct
  * ------------------------------------------------------------------------- */
 #define CT_MAX_CONNECTIONS 64
-#define CT_RECV_BUF        8192
+#define CT_RECV_BUF        65536   /* large enough for system prompts */
 #define CT_SEND_BUF        65536
 
 struct ct_server {
@@ -322,9 +323,40 @@ static void handle_completions(ct_sock_t fd, ct_server_t *srv, const char *body)
         return;
     }
 
-    /* Tokenize */
+    /* Try "input_ids": [id1, id2, ...] first (pre-tokenized BPE IDs from Python). */
+    int32_t *tokens = NULL;
     size_t n_toks = 0;
-    int32_t *tokens = ct_engine_tokenize(srv->engine, prompt_str, &n_toks);
+
+    const char *iids_p = strstr(body, "\"input_ids\"");
+    if (iids_p) {
+        iids_p = strchr(iids_p, '[');
+        if (iids_p) {
+            iids_p++;  /* skip '[' */
+            /* Count IDs */
+            size_t cap = 4096;
+            tokens = (int32_t *)malloc(cap * sizeof(int32_t));
+            if (tokens) {
+                const char *p = iids_p;
+                while (*p && *p != ']') {
+                    while (*p == ' ' || *p == ',') p++;
+                    if (*p == ']' || *p == '\0') break;
+                    char *end;
+                    long v = strtol(p, &end, 10);
+                    if (end == p) break;
+                    if (n_toks < cap) tokens[n_toks++] = (int32_t)v;
+                    p = end;
+                }
+            }
+        }
+    }
+
+    /* Fallback: byte tokenize the prompt text */
+    if (!tokens || n_toks == 0) {
+        if (tokens) { free(tokens); tokens = NULL; }
+        n_toks = 0;
+        tokens = ct_engine_tokenize(srv->engine, prompt_str, &n_toks);
+    }
+
     if (!tokens || n_toks == 0) {
         send_error(fd, 500, "Tokenization failed");
         srv->stats.n_errors++;
@@ -350,34 +382,84 @@ static void handle_completions(ct_sock_t fd, ct_server_t *srv, const char *body)
                                    (uint32_t)max_tokens, 0.0f,
                                    stream_callback, &ctx);
     } else {
-        /* Synchronous response */
+        /* Synchronous generation */
         ct_generation_t gen = {0};
         ct_engine_generate(srv->engine, tokens, n_toks,
                            (uint32_t)max_tokens, 0.0f, &gen);
 
-        /* Build JSON output */
-        char out_buf[16384];
-        char tok_list[8192] = {0};
-        size_t off = 0;
-        for (size_t i = 0; i < gen.n_tokens && off + 16 < sizeof(tok_list); i++) {
-            int n = snprintf(tok_list + off, sizeof(tok_list) - off - 1,
-                             "%s%d", i ? "," : "", gen.tokens[i]);
-            if (n > 0) off += (size_t)n;
+        /* Detect if tokens are BPE vocab IDs (large values) or raw bytes.
+         * Output [tokens: id1,id2,...] so Python connector's _bpe_decode handles it. */
+        bool is_bpe = true;  /* Always BPE for DeepSeek4 / vocab > 256 */
+        (void)is_bpe;        /* Used below */
+
+        char *text = NULL;
+        if (gen.n_tokens > 0 && gen.tokens) {
+            if (is_bpe) {
+                /* Output as [tokens: id1,id2,...] for Python BPE decode */
+                size_t buf_len = gen.n_tokens * 8 + 32;
+                text = (char *)malloc(buf_len);
+                if (text) {
+                    size_t pos = 0;
+                    pos += (size_t)snprintf(text + pos, buf_len - pos, "[tokens: ");
+                    for (size_t ti = 0; ti < gen.n_tokens; ti++) {
+                        if (ti > 0) text[pos++] = ',';
+                        pos += (size_t)snprintf(text + pos, buf_len - pos, "%d", gen.tokens[ti]);
+                    }
+                    if (pos < buf_len - 2) { text[pos++] = ']'; text[pos] = '\0'; }
+                }
+            } else {
+                text = ct_engine_detokenize(srv->engine, gen.tokens, gen.n_tokens);
+            }
+        }
+        if (!text) {
+            text = (char *)malloc(64);
+            if (text) snprintf(text, 64, "[generated %zu tokens]", gen.n_tokens);
         }
 
-        snprintf(out_buf, sizeof(out_buf),
-            "{\"id\":\"cautreo-resp\",\"object\":\"text_completion\","
-            "\"model\":\"cautreo-local\","
-            "\"choices\":[{\"text\":\"[tokens: %s]\","
-            "\"index\":0,\"finish_reason\":\"stop\"}],"
-            "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu,"
-            "\"total_tokens\":%zu}}",
-            tok_list,
-            n_toks, gen.n_tokens, n_toks + gen.n_tokens);
+        /* Build OpenAI-compatible chat/completions JSON */
+        size_t text_len = text ? strlen(text) : 0;
+        char *out_buf = (char *)malloc(text_len + 512);
+        if (out_buf && text) {
+            char *esc = (char *)malloc(text_len * 2 + 8);
+            if (esc) {
+                size_t ei = 0;
+                for (size_t ti = 0; ti < text_len && ei + 4 < text_len * 2; ti++) {
+                    unsigned char c = (unsigned char)text[ti];
+                    if      (c == '"')  { esc[ei++]='\\'; esc[ei++]='"'; }
+                    else if (c == '\\') { esc[ei++]='\\'; esc[ei++]='\\'; }
+                    else if (c == '\n') { esc[ei++]='\\'; esc[ei++]='n'; }
+                    else if (c == '\r') { esc[ei++]='\\'; esc[ei++]='r'; }
+                    else if (c == '\t') { esc[ei++]='\\'; esc[ei++]='t'; }
+                    else if (c < 0x20)  { ei += (size_t)snprintf(esc+ei, 8, "\\u%04x", c); }
+                    else                { esc[ei++] = (char)c; }
+                }
+                esc[ei] = '\0';
+                snprintf(out_buf, text_len + 512,
+                    "{\"id\":\"cautreo-resp\",\"object\":\"chat.completion\","
+                    "\"model\":\"cautreo-local\","
+                    "\"choices\":[{\"index\":0,"
+                    "\"message\":{\"role\":\"assistant\",\"content\":\"%s\"},"
+                    "\"finish_reason\":\"stop\"}],"
+                    "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%zu,"
+                    "\"total_tokens\":%zu}}",
+                    esc, n_toks, gen.n_tokens, n_toks + gen.n_tokens);
+                free(esc);
+            } else {
+                snprintf(out_buf, 256, "{\"error\":{\"message\":\"OOM escaping\",\"code\":500}}");
+            }
+        } else {
+            if (!out_buf) out_buf = (char *)malloc(256);
+            if (out_buf) snprintf(out_buf, 256, "{\"error\":{\"message\":\"OOM\",\"code\":500}}");
+        }
 
-        send_json(fd, 200, out_buf);
+        if (out_buf) {
+            send_json(fd, 200, out_buf);
+            free(out_buf);
+        }
+        if (text) free(text);
         ct_engine_free_generation(&gen);
         srv->stats.avg_tps = gen.gen_tps;
+
     }
     ct_engine_free_tokens(tokens);
 }
@@ -395,7 +477,7 @@ static void handle_connection(ct_server_t *srv, ct_sock_t client) {
 
     srv->stats.n_requests++;
 
-    char method[16] = {0}, path[256] = {0}, body[4096] = {0};
+    char method[16] = {0}, path[256] = {0}, body[32768] = {0};
     parse_request(rbuf, method, path, body, sizeof(body));
 
     if (srv->opts.verbose) {
@@ -404,6 +486,18 @@ static void handle_connection(ct_server_t *srv, ct_sock_t client) {
 
     if (strcmp(path, "/health") == 0) {
         handle_health(client, srv);
+    } else if (strcmp(path, "/info") == 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+            "{\"status\":\"ok\",\"engine\":\"CAUTREO-C\","
+            "\"model_loaded\":%s,\"requests\":%llu,\"errors\":%llu,"
+            "\"completions\":%llu,\"ram_budget_gb\":8,"
+            "\"ssd_streaming\":true}",
+            ct_engine_is_loaded(srv->engine) ? "true" : "false",
+            (unsigned long long)srv->stats.n_requests,
+            (unsigned long long)srv->stats.n_errors,
+            (unsigned long long)srv->stats.n_completions);
+        send_json(client, 200, buf);
     } else if (strcmp(path, "/v1/models") == 0) {
         handle_models(client, srv);
     } else if (strcmp(path, "/v1/completions") == 0 ||

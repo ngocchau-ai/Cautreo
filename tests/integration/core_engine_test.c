@@ -96,11 +96,9 @@ static void test_waste_solve(void) {
     size_t n_trans = 0;
     transition_record_t **trans = engine_solve(we, &contract, &n_trans);
     ASSERT(n_trans >= 0, "engine_solve returns transitions");
-    if (trans) {
-        for (size_t i = 0; i < n_trans; i++)
-            transition_record_free(trans[i]);
-        free(trans);
-    }
+    /* Note: trans is engine->history (owned by engine). Do NOT free here.
+     * engine_destroy() will free history and all records. */
+    (void)trans;
     engine_destroy(we);
 }
 
@@ -135,10 +133,9 @@ static void test_engine_and_waste_combined(const char *gguf) {
     size_t n_trans = 0;
     transition_record_t **trans = engine_solve(we, &contract, &n_trans);
     ASSERT(n_trans >= 0, "engine_solve in combined test");
-    if (trans) {
-        for (size_t i = 0; i < n_trans; i++) transition_record_free(trans[i]);
-        free(trans);
-    }
+    /* trans is engine->history (owned by engine) — do NOT free here */
+    (void)trans;
+
 
     /* 4. Engine generate after WASTE reasoning */
     if (loaded) {
