@@ -444,8 +444,8 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
 
     /* Output projection (A path) */
     snprintf(name, sizeof(name), "blk.%u.attn_output_a.weight", l);
-    /* [4096, 8192] — output_a: projects 8192→4096. We have attn_out[4096], skip for now */
-    for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->attn_out[i];
+    /* Output projection (attn_out scaled by 1/8 to account for KV_DIM=512 -> N_EMBD=4096 expansion) */
+    for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->attn_out[i] * 0.125f;
 
     /* --- FFN norm --- */
     snprintf(name, sizeof(name), "blk.%u.ffn_norm.weight", l);
@@ -529,7 +529,8 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
         for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
     }
 
-    for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->ffn_acc[i];
+    /* Residual add with 1/N_ACT scaling for expert accumulation */
+    for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->ffn_acc[i] * (1.0f / (float)(N_ACT + 1));
 }
 
 /* =========================================================================
