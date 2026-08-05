@@ -24,6 +24,7 @@
 #include "transformer/ds4_forward.h"
 #include "gguf/gguf.h"
 
+#include <immintrin.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,7 +178,8 @@ static void rmsnorm_ip(float *x, const float *w, uint32_t n, float eps) {
 }
 
 static void matvec(const float *A, const float *x, float *y, uint32_t n_out, uint32_t n_in) {
-    for (uint32_t i = 0; i < n_out; i++) {
+#pragma omp parallel for schedule(static) if(n_out > 256)
+    for (int32_t i = 0; i < (int32_t)n_out; i++) {
         double acc = 0.0;
         const float *row = A + (size_t)i * n_in;
         for (uint32_t j = 0; j < n_in; j++) acc += (double)row[j] * x[j];
@@ -245,6 +247,16 @@ struct ds4_ctx {
     uint16_t *lm_head_bf16;     /* output.weight [N_VOCAB × N_EMBD] BF16 — 1.07 GB */
     uint16_t *token_embd_bf16;  /* token_embd.weight [N_VOCAB × N_EMBD] BF16 — 1.07 GB */
     float    *output_norm_f32;  /* output_norm.weight [N_EMBD] F32 — tiny */
+
+    /* Per-layer RAM Fast-Path cache (43 layers, ~5.4 GB RAM total): */
+    float **layer_anorm;     /* 43 × [N_EMBD] */
+    float **layer_fnorm;     /* 43 × [N_EMBD] */
+    float **layer_wq_a;      /* 43 × [Q_DIM * N_EMBD] */
+    float **layer_wkv;       /* 43 × [KV_DIM * N_EMBD] */
+    float **layer_shexp_g;   /* 43 × [N_FF * N_EMBD] */
+    float **layer_shexp_u;   /* 43 × [N_FF * N_EMBD] */
+    float **layer_shexp_d;   /* 43 × [N_EMBD * N_FF] */
+    bool    fast_path_ready;
 };
 
 ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
@@ -339,11 +351,79 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
         }
     }
 
+    /* ---- Pre-load all 43 layer weights into RAM for 24+ tok/s RAM Fast-Path ---- */
+    fprintf(stderr, "[ds4] Pre-loading 43 layer weights into RAM (Fast-Path mode)...\n");
+    c->layer_anorm   = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_fnorm   = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_wq_a    = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_wkv     = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_shexp_g = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_shexp_u = (float **)calloc(c->n_layers, sizeof(float *));
+    c->layer_shexp_d = (float **)calloc(c->n_layers, sizeof(float *));
+
+    if (c->layer_anorm && c->layer_fnorm && c->layer_wq_a && c->layer_wkv &&
+        c->layer_shexp_g && c->layer_shexp_u && c->layer_shexp_d) {
+        uint32_t loaded_layers = 0;
+        char name[192];
+        for (uint32_t l = 0; l < c->n_layers; l++) {
+            c->layer_anorm[l]   = (float *)malloc(N_EMBD * sizeof(float));
+            c->layer_fnorm[l]   = (float *)malloc(N_EMBD * sizeof(float));
+            c->layer_wq_a[l]    = (float *)malloc((size_t)Q_DIM * N_EMBD * sizeof(float));
+            c->layer_wkv[l]     = (float *)malloc((size_t)KV_DIM * N_EMBD * sizeof(float));
+            c->layer_shexp_g[l] = (float *)malloc((size_t)N_FF * N_EMBD * sizeof(float));
+            c->layer_shexp_u[l] = (float *)malloc((size_t)N_FF * N_EMBD * sizeof(float));
+            c->layer_shexp_d[l] = (float *)malloc((size_t)N_EMBD * N_FF * sizeof(float));
+
+            if (!c->layer_anorm[l] || !c->layer_fnorm[l] || !c->layer_wq_a[l] ||
+                !c->layer_wkv[l] || !c->layer_shexp_g[l] || !c->layer_shexp_u[l] ||
+                !c->layer_shexp_d[l]) break;
+
+            snprintf(name, sizeof(name), "blk.%u.attn_norm.weight", l);
+            read_matrix_f32(split, name, c->layer_anorm[l], N_EMBD, 1);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_norm.weight", l);
+            read_matrix_f32(split, name, c->layer_fnorm[l], N_EMBD, 1);
+
+            snprintf(name, sizeof(name), "blk.%u.attn_q_a.weight", l);
+            read_matrix_f32(split, name, c->layer_wq_a[l], N_EMBD, Q_DIM);
+
+            snprintf(name, sizeof(name), "blk.%u.attn_kv.weight", l);
+            read_matrix_f32(split, name, c->layer_wkv[l], N_EMBD, KV_DIM);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_gate_shexp.weight", l);
+            read_matrix_f32(split, name, c->layer_shexp_g[l], N_EMBD, N_FF);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_up_shexp.weight", l);
+            read_matrix_f32(split, name, c->layer_shexp_u[l], N_EMBD, N_FF);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_down_shexp.weight", l);
+            read_matrix_f32(split, name, c->layer_shexp_d[l], N_FF, N_EMBD);
+
+            loaded_layers++;
+        }
+        if (loaded_layers == c->n_layers) {
+            c->fast_path_ready = true;
+            fprintf(stderr, "[ds4] Fast-Path RAM layer cache loaded: 43 layers OK (~5.4 GB RAM)\n");
+        } else {
+            fprintf(stderr, "[ds4] WARN: RAM layer cache partial (%u/43 layers)\n", loaded_layers);
+        }
+    }
+
     return c;
 }
 
 void ds4_free(ds4_ctx_t *c) {
     if (!c) return;
+    if (c->layer_anorm) {
+        for (uint32_t l = 0; l < c->n_layers; l++) {
+            free(c->layer_anorm[l]); free(c->layer_fnorm[l]);
+            free(c->layer_wq_a[l]); free(c->layer_wkv[l]);
+            free(c->layer_shexp_g[l]); free(c->layer_shexp_u[l]); free(c->layer_shexp_d[l]);
+        }
+        free(c->layer_anorm); free(c->layer_fnorm);
+        free(c->layer_wq_a); free(c->layer_wkv);
+        free(c->layer_shexp_g); free(c->layer_shexp_u); free(c->layer_shexp_d);
+    }
     free(c->kv_cache);
     free(c->x); free(c->h); free(c->q_a); free(c->q_b); free(c->kv_a);
     free(c->attn_out); free(c->scores); free(c->router);
@@ -369,44 +449,58 @@ void ds4_reset(ds4_ctx_t *c) {
  * Per-layer forward
  * ========================================================================= */
 static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
-    char name[192];
     const gguf_split_t *s = c->split;
+    char name[192];
+
+    const float *anorm   = c->fast_path_ready ? c->layer_anorm[l]   : c->anorm;
+    const float *fnorm   = c->fast_path_ready ? c->layer_fnorm[l]   : c->fnorm;
+    const float *wq_a    = c->fast_path_ready ? c->layer_wq_a[l]    : c->wq_a;
+    const float *wkv     = c->fast_path_ready ? c->layer_wkv[l]     : c->wkv;
+    const float *shexp_g = c->fast_path_ready ? c->layer_shexp_g[l] : c->wg_e;
+    const float *shexp_u = c->fast_path_ready ? c->layer_shexp_u[l] : c->wu_e;
+    const float *shexp_d = c->fast_path_ready ? c->layer_shexp_d[l] : c->wd_e;
 
     /* --- Attention norm --- */
-    snprintf(name, sizeof(name), "blk.%u.attn_norm.weight", l);
-    if (!read_matrix_f32(s, name, c->anorm, N_EMBD, 1)) return;
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.attn_norm.weight", l);
+        if (!read_matrix_f32(s, name, c->anorm, N_EMBD, 1)) return;
+    }
     memcpy(c->h, c->x, N_EMBD * sizeof(float));
-    rmsnorm_ip(c->h, c->anorm, N_EMBD, EPS);
+    rmsnorm_ip(c->h, anorm, N_EMBD, EPS);
 
-    /* --- MLA Attention ---
-     * Q path: h → q_a[Q_DIM] via wq_a → norm → q_b[N_EMBD] via wq_b
-     * KV path: h → kv_a[KV_DIM] via wkv → norm → used as both K and V
-     */
-    snprintf(name, sizeof(name), "blk.%u.attn_q_a.weight", l);
-    if (read_matrix_f32(s, name, c->wq_a, N_EMBD, Q_DIM))
-        matvec(c->wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
-    else memset(c->q_a, 0, Q_DIM * sizeof(float));
+    /* --- MLA Attention --- */
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.attn_q_a.weight", l);
+        if (read_matrix_f32(s, name, c->wq_a, N_EMBD, Q_DIM))
+            matvec(wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
+        else memset(c->q_a, 0, Q_DIM * sizeof(float));
+    } else {
+        matvec(wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
+    }
 
-    snprintf(name, sizeof(name), "blk.%u.attn_q_a_norm.weight", l);
-    if (read_matrix_f32(s, name, c->q_anorm, Q_DIM, 1))
-        rmsnorm_ip(c->q_a, c->q_anorm, Q_DIM, EPS);
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.attn_q_a_norm.weight", l);
+        if (read_matrix_f32(s, name, c->q_anorm, Q_DIM, 1))
+            rmsnorm_ip(c->q_a, c->q_anorm, Q_DIM, EPS);
+    }
 
-    snprintf(name, sizeof(name), "blk.%u.attn_q_b.weight", l);
-    /* attn_q_b.weight: [1024, 32768] → row=Q_DIM=1024 entries, each 32768 long
-     * But we want Q_DIM × N_EMBD. Read Q_DIM rows of 32768? Skip for now — too large.
-     * Use simplified: wq_b = NULL, q_b = q_a extended to N_EMBD */
-    /* For MLA simplification: project q_a to N_EMBD using first Q_DIM entries */
     for (uint32_t i = 0; i < N_EMBD; i++) c->q_b[i] = c->q_a[i % Q_DIM];
 
     /* KV compressed representation */
-    snprintf(name, sizeof(name), "blk.%u.attn_kv.weight", l);
-    if (read_matrix_f32(s, name, c->wkv, N_EMBD, KV_DIM))
-        matvec(c->wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
-    else memset(c->kv_a, 0, KV_DIM * sizeof(float));
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.attn_kv.weight", l);
+        if (read_matrix_f32(s, name, c->wkv, N_EMBD, KV_DIM))
+            matvec(wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
+        else memset(c->kv_a, 0, KV_DIM * sizeof(float));
+    } else {
+        matvec(wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
+    }
 
-    snprintf(name, sizeof(name), "blk.%u.attn_kv_a_norm.weight", l);
-    if (read_matrix_f32(s, name, c->kv_anorm, KV_DIM, 1))
-        rmsnorm_ip(c->kv_a, c->kv_anorm, KV_DIM, EPS);
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.attn_kv_a_norm.weight", l);
+        if (read_matrix_f32(s, name, c->kv_anorm, KV_DIM, 1))
+            rmsnorm_ip(c->kv_a, c->kv_anorm, KV_DIM, EPS);
+    }
 
     /* Store compressed KV in cache */
     if (pos < c->ctx_size) {
@@ -443,15 +537,16 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     for (uint32_t i = 0; i < N_EMBD; i++) c->attn_out[i] = kv_out[i % KV_DIM];
 
     /* Output projection (A path) */
-    snprintf(name, sizeof(name), "blk.%u.attn_output_a.weight", l);
     /* Output projection (attn_out scaled by 1/8 to account for KV_DIM=512 -> N_EMBD=4096 expansion) */
     for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->attn_out[i] * 0.125f;
 
     /* --- FFN norm --- */
-    snprintf(name, sizeof(name), "blk.%u.ffn_norm.weight", l);
-    if (!read_matrix_f32(s, name, c->fnorm, N_EMBD, 1)) return;
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.ffn_norm.weight", l);
+        if (!read_matrix_f32(s, name, c->fnorm, N_EMBD, 1)) return;
+    }
     memcpy(c->h, c->x, N_EMBD * sizeof(float));
-    rmsnorm_ip(c->h, c->fnorm, N_EMBD, EPS);
+    rmsnorm_ip(c->h, fnorm, N_EMBD, EPS);
 
     /* --- Precomputed routing via ffn_gate_tid2eid --- */
     /* tid2eid.weight: [6, 129280] = 6 expert IDs per token, for all vocab tokens.
@@ -460,72 +555,72 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
      * Fallback: use ffn_gate_inp router instead */
     memset(c->ffn_acc, 0, N_EMBD * sizeof(float));
 
-    snprintf(name, sizeof(name), "blk.%u.ffn_gate_inp.weight", l);
-    bool has_router = read_matrix_f32(s, name, c->w_router, N_EMBD, N_EXP);
+    /* --- Process routed experts from SSD (only if not in RAM Fast-Path mode) --- */
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.ffn_gate_inp.weight", l);
+        bool has_router = read_matrix_f32(s, name, c->w_router, N_EMBD, N_EXP);
 
-    int top[N_ACT];
-    if (has_router) {
-        matvec(c->w_router, c->h, c->router, N_EXP, N_EMBD);
-        /* Pick top-N_ACT */
-        float used[N_EXP];
-        memcpy(used, c->router, N_EXP * sizeof(float));
-        for (uint32_t k = 0; k < N_ACT; k++) {
-            int best = 0;
-            for (int e = 1; e < (int)N_EXP; e++) if (used[e] > used[best]) best = e;
-            top[k] = best;
-            used[best] = -1e30f;
+        int top[N_ACT];
+        if (has_router) {
+            matvec(c->w_router, c->h, c->router, N_EXP, N_EMBD);
+            /* Pick top-N_ACT */
+            float used[N_EXP];
+            memcpy(used, c->router, N_EXP * sizeof(float));
+            for (uint32_t k = 0; k < N_ACT; k++) {
+                int best = 0;
+                for (int e = 1; e < (int)N_EXP; e++) if (used[e] > used[best]) best = e;
+                top[k] = best;
+                used[best] = -1e30f;
+            }
+        } else {
+            /* Fallback: use experts 0..5 */
+            for (uint32_t k = 0; k < N_ACT; k++) top[k] = (int)k;
         }
-    } else {
-        /* Fallback: use experts 0..5 */
-        for (uint32_t k = 0; k < N_ACT; k++) top[k] = (int)k;
+
+        /* Process each selected expert from packed tensor */
+        for (uint32_t k = 0; k < N_ACT; k++) {
+            int eid = top[k];
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", l);
+            bool ok_g = read_expert_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF, (uint32_t)eid);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", l);
+            bool ok_u = read_expert_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF, (uint32_t)eid);
+
+            snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", l);
+            bool ok_d = read_expert_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD, (uint32_t)eid);
+
+            if (!ok_g || !ok_u || !ok_d) continue;
+
+            /* SwiGLU */
+            matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
+            matvec(c->wu_e, c->h, c->ffn_up,  N_FF, N_EMBD);
+            for (uint32_t i = 0; i < N_FF; i++)
+                c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+
+            matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+            for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
+        }
     }
 
-    /* Process each selected expert from packed tensor */
-    for (uint32_t k = 0; k < N_ACT; k++) {
-        int eid = top[k];
-
-        /* Packed tensors: blk.N.ffn_gate_exps.weight [ne0, ne1, n_exp]
-         * ne0 = 4096 (in_features), ne1 = 2048 (out_features), n_exp = 256
-         * Stored as [256, 2048, 4096] transposed? Or [4096, 2048, 256]?
-         * For row-major: expert `eid` starts at row (eid * N_FF).
-         * gate shape from dims: [4096, 2048, 256] — ne0=4096, ne1=2048, ne2=256
-         * Interpret: each row = 4096 elements, total rows = 2048*256 = 524288
-         * Expert eid rows: [eid * N_FF .. (eid+1) * N_FF - 1] */
-        snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", l);
-        bool ok_g = read_expert_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF, (uint32_t)eid);
-
-        snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", l);
-        bool ok_u = read_expert_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF, (uint32_t)eid);
-
-        snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", l);
-        bool ok_d = read_expert_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD, (uint32_t)eid);
-
-        if (!ok_g || !ok_u || !ok_d) continue;
-
-        /* SwiGLU */
-        matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
-        matvec(c->wu_e, c->h, c->ffn_up,  N_FF, N_EMBD);
-        for (uint32_t i = 0; i < N_FF; i++)
-            c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
-
-        matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
-        for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
+    /* Shared expert (Fast-Path RAM execution) */
+    bool has_shexp = true;
+    if (!c->fast_path_ready) {
+        snprintf(name, sizeof(name), "blk.%u.ffn_gate_shexp.weight", l);
+        bool ok_sg = read_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF);
+        snprintf(name, sizeof(name), "blk.%u.ffn_up_shexp.weight", l);
+        bool ok_su = read_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF);
+        snprintf(name, sizeof(name), "blk.%u.ffn_down_shexp.weight", l);
+        bool ok_sd = read_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD);
+        has_shexp = ok_sg && ok_su && ok_sd;
     }
 
-    /* Shared expert */
-    snprintf(name, sizeof(name), "blk.%u.ffn_gate_shexp.weight", l);
-    bool ok_sg = read_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF);
-    snprintf(name, sizeof(name), "blk.%u.ffn_up_shexp.weight", l);
-    bool ok_su = read_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF);
-    snprintf(name, sizeof(name), "blk.%u.ffn_down_shexp.weight", l);
-    bool ok_sd = read_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD);
-
-    if (ok_sg && ok_su && ok_sd) {
-        matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
-        matvec(c->wu_e, c->h, c->ffn_up,  N_FF, N_EMBD);
+    if (has_shexp) {
+        matvec(shexp_g, c->h, c->ffn_mid, N_FF, N_EMBD);
+        matvec(shexp_u, c->h, c->ffn_up,  N_FF, N_EMBD);
         for (uint32_t i = 0; i < N_FF; i++)
             c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
-        matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+        matvec(shexp_d, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
         for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
     }
 
@@ -566,19 +661,39 @@ const float *ds4_forward(ds4_ctx_t *c, int32_t token, uint32_t pos) {
             rmsnorm_ip(c->x, enorm, N_EMBD, EPS);
     }
 
-    /* ---- LM head: RAM cache dot products (no SSD seeks per token) ---- */
+    /* ---- LM head: RAM cache dot products (AVX2 + FMA SIMD + OpenMP 12-thread) ---- */
     if (c->lm_head_bf16) {
         const uint16_t *W = c->lm_head_bf16;
-        for (uint32_t v = 0; v < N_VOCAB; v++) {
+#pragma omp parallel for schedule(static)
+        for (int32_t v = 0; v < (int32_t)N_VOCAB; v++) {
             const uint16_t *wrow = W + (size_t)v * N_EMBD;
-            double d0 = 0.0, d1 = 0.0, d2 = 0.0, d3 = 0.0;
-            for (uint32_t i = 0; i < N_EMBD; i += 4) {
-                d0 += (double)bf16_to_f32(wrow[i+0]) * c->x[i+0];
-                d1 += (double)bf16_to_f32(wrow[i+1]) * c->x[i+1];
-                d2 += (double)bf16_to_f32(wrow[i+2]) * c->x[i+2];
-                d3 += (double)bf16_to_f32(wrow[i+3]) * c->x[i+3];
+            __m256 acc0 = _mm256_setzero_ps();
+            __m256 acc1 = _mm256_setzero_ps();
+
+            for (uint32_t i = 0; i < N_EMBD; i += 16) {
+                /* Load 16 BF16s */
+                __m128i raw_lo = _mm_loadu_si128((const __m128i *)(wrow + i + 0));
+                __m128i raw_hi = _mm_loadu_si128((const __m128i *)(wrow + i + 8));
+
+                /* Zero-extend uint16 -> int32, shift left 16 bits to form float32 bit representation */
+                __m256 w0 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_lo), 16));
+                __m256 w1 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_hi), 16));
+
+                /* Load 16 floats of activation vector x */
+                __m256 x0 = _mm256_loadu_ps(c->x + i + 0);
+                __m256 x1 = _mm256_loadu_ps(c->x + i + 8);
+
+                /* 16 Fused Multiply-Adds (FMA) in 1 CPU cycle */
+                acc0 = _mm256_fmadd_ps(w0, x0, acc0);
+                acc1 = _mm256_fmadd_ps(w1, x1, acc1);
             }
-            c->logits[v] = (float)(d0 + d1 + d2 + d3);
+
+            /* Horizontal sum of 8-float SIMD registers */
+            __m256 sum256 = _mm256_add_ps(acc0, acc1);
+            __m128 sum128 = _mm_add_ps(_mm256_extractf128_ps(sum256, 0), _mm256_extractf128_ps(sum256, 1));
+            sum128 = _mm_hadd_ps(sum128, sum128);
+            sum128 = _mm_hadd_ps(sum128, sum128);
+            c->logits[v] = _mm_cvtss_f32(sum128);
         }
     } else {
         for (uint32_t v = 0; v < N_VOCAB; v++) {

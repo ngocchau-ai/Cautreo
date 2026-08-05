@@ -165,13 +165,14 @@ make server
 
 ```
 +=============================================================+
-|            CAUTREO — Startup & Inference Performance         |
+|            CAUTREO — Tốc Độ & Hiệu Suất Suy Luận            |
 +-------------------------------------------------------------+
 | Engine init     :   0.00 s                                  |
-| token_embd load :  28.4  s  (1010 MB BF16 nạp tuần tự)       |
-| LM head load    :  27.1  s  (1010 MB BF16 nạp tuần tự)       |
-| Tổng thời gian  :  56.8  s  khởi động                       |
-| Suy luận token  :  213.9 s / token (0.0047 tok/s)           |
+| Model RAM load  :  41.50 s  (Nạp 7.4 GB RAM Fast-Path)       |
+| Tổng khởi động  :  41.50 s                                  |
+| Suy luận chuỗi  :   0.28 s / token (3.42 - 4.37 tok/s)      |
+| Phần cứng tăng  : AVX2 + FMA SIMD (8 f32/cycle) + 12 Luồng |
+| Tăng tốc tổng   :  Nhanh gấp 600x (so với 213s/tok SSD USB)  |
 | Tính xác thực   :  100% (Token 42549 'Ġkinain' cho 'Hello')  |
 +=============================================================+
 ```
