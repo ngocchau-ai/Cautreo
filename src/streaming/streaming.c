@@ -1,221 +1,358 @@
 /*
- * streaming.c — SSD streaming expert cache (WASTE core idea).
+ * streaming.c — SSD streaming engine (CAUTREO v2)
+ *
+ * Quản lý I/O giữa RAM và SSD cho trọng số rare/cold.
+ * Cache LRU đơn giản, hỗ trợ prefetch, thống kê throughput.
  */
 
 #include "streaming/streaming.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <math.h>
 
-/* ---------------------------------------------------------------------------
- * LRU expert cache entry
- * ------------------------------------------------------------------------- */
-typedef struct expert_slot {
-    uint32_t layer;
-    uint32_t expert;
-    uint64_t last_access;   /* monotonic timestamp */
-    bool     resident;
-    struct expert_slot *prev;
-    struct expert_slot *next;
-} expert_slot_t;
+#ifdef _WIN32
+#  include <windows.h>
+#  include <fileapi.h>
+#else
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#endif
 
-struct ct_expert_cache {
+/* ── Constants ───────────────────────────────────────────────────────── */
+
+#define STREAMER_MAX_REGIONS 4096
+#define STREAMER_PATH_MAX    512
+
+/* ── Cache entry ─────────────────────────────────────────────────────── */
+
+typedef struct {
+    char     name[64];         /* weight name */
+    uint64_t offset;           /* offset in file */
+    uint64_t size;             /* bytes cached */
+    uint64_t last_access_ms;   /* for LRU eviction */
+    uint32_t access_count;
+    bool     valid;
+} ct_cache_entry_t;
+
+/* ── Streamer struct ─────────────────────────────────────────────────── */
+
+struct ct_streamer_s {
     ct_stream_config_t cfg;
-    uint32_t n_layers;
-    uint32_t n_experts;
-    uint64_t bytes_per_expert;
+    ct_cache_entry_t   cache[STREAMER_MAX_REGIONS];
+    uint32_t           cache_count;
+    uint64_t           cache_used_bytes;
 
-    expert_slot_t **slots;          /* [layer][expert] -> slot */
-    expert_slot_t  *slots_flat;     /* flat allocation */
-    uint32_t        n_slots;
-    uint32_t        n_resident;
-
-    expert_slot_t  *lru_head;       /* most recently used */
-    expert_slot_t  *lru_tail;       /* least recently used */
-
-    uint64_t        timestamp;
-    uint64_t        hits;
-    uint64_t        misses;
-    uint64_t        evictions;
+    ct_stream_stats_t  stats;
 };
 
-/* ---------------------------------------------------------------------------
- * LRU helpers
- * ------------------------------------------------------------------------- */
-static void lru_remove(expert_slot_t *s) {
-    if (s->prev) s->prev->next = s->next;
-    if (s->next) s->next->prev = s->prev;
+/* ── Helpers ─────────────────────────────────────────────────────────── */
+
+static uint64_t now_ms(void) {
+#ifdef _WIN32
+    return (uint64_t)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+#endif
 }
 
-static void lru_push_front(expert_slot_t *s, expert_slot_t **head, expert_slot_t **tail) {
-    s->prev = NULL;
-    s->next = *head;
-    if (*head) (*head)->prev = s;
-    *head = s;
-    if (!*tail) *tail = s;
-}
-
-static void lru_touch(expert_slot_t *s, expert_slot_t **head, expert_slot_t **tail) {
-    if (s == *head) return; /* already MRU */
-    lru_remove(s);
-    lru_push_front(s, head, tail);
-}
-
-/* ---------------------------------------------------------------------------
- * Expert cache lifecycle
- * ------------------------------------------------------------------------- */
-ct_expert_cache_t *ct_expert_cache_create(const ct_stream_config_t *cfg,
-                                       uint32_t n_layers, uint32_t n_experts,
-                                       uint64_t bytes_per_expert) {
-    ct_expert_cache_t *c = (ct_expert_cache_t *)calloc(1, sizeof(ct_expert_cache_t));
-    if (!c) return NULL;
-
-    if (cfg) c->cfg = *cfg;
-    c->n_layers = n_layers;
-    c->n_experts = n_experts;
-    c->bytes_per_expert = bytes_per_expert;
-
-    c->n_slots = n_layers * n_experts;
-    c->slots_flat = (expert_slot_t *)calloc(c->n_slots, sizeof(expert_slot_t));
-    c->slots = (expert_slot_t **)calloc(n_layers, sizeof(expert_slot_t *));
-    if (!c->slots_flat || !c->slots) {
-        free(c->slots_flat);
-        free(c->slots);
-        free(c);
-        return NULL;
+/* Build full file path for a weight */
+static void weight_path(char *buf, size_t bufsz, const char *base,
+                        const char *name) {
+    if (base && base[0]) {
+        snprintf(buf, bufsz, "%s/%s.bin", base, name);
+    } else {
+        snprintf(buf, bufsz, "%s.bin", name);
     }
-    for (uint32_t l = 0; l < n_layers; l++) {
-        c->slots[l] = &c->slots_flat[l * n_experts];
-        for (uint32_t e = 0; e < n_experts; e++) {
-            c->slots[l][e].layer = l;
-            c->slots[l][e].expert = e;
+}
+
+/* Find cache entry by name + offset */
+static int find_cache(const ct_streamer_t *s, const char *name, uint64_t offset) {
+    for (uint32_t i = 0; i < s->cache_count; i++) {
+        if (s->cache[i].valid &&
+            strcmp(s->cache[i].name, name) == 0 &&
+            s->cache[i].offset == offset) {
+            return (int)i;
         }
     }
-    return c;
+    return -1;
 }
 
-void ct_expert_cache_destroy(ct_expert_cache_t *c) {
-    if (!c) return;
-    free(c->slots_flat);
-    free(c->slots);
-    free(c);
+/* Find LRU victim */
+static int find_lru(const ct_streamer_t *s) {
+    int victim = -1;
+    uint64_t oldest = UINT64_MAX;
+    for (uint32_t i = 0; i < s->cache_count; i++) {
+        if (s->cache[i].valid && s->cache[i].last_access_ms < oldest) {
+            oldest = s->cache[i].last_access_ms;
+            victim = (int)i;
+        }
+    }
+    return victim;
 }
 
-/* ---------------------------------------------------------------------------
- * Touch: ensure expert is resident, load on miss
- * ------------------------------------------------------------------------- */
-bool ct_expert_cache_touch(ct_expert_cache_t *c, uint32_t layer, uint32_t expert) {
-    if (!c || layer >= c->n_layers || expert >= c->n_experts) return false;
+/* ── Platform I/O ────────────────────────────────────────────────────── */
 
-    expert_slot_t *s = &c->slots[layer][expert];
-    s->last_access = ++c->timestamp;
+#ifdef _WIN32
 
-    if (s->resident) {
-        lru_touch(s, &c->lru_head, &c->lru_tail);
-        c->hits++;
-        return true;
+static uint64_t platform_read(const char *path, uint64_t offset,
+                              uint64_t size, void *dst) {
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)offset;
+    if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) {
+        CloseHandle(h);
+        return 0;
     }
 
-    /* Cache miss: need to load from disk. */
-    c->misses++;
+    DWORD read = 0;
+    BOOL ok = ReadFile(h, dst, (DWORD)size, &read, NULL);
+    CloseHandle(h);
+    return ok ? (uint64_t)read : 0;
+}
 
-    /* Evict LRU if at capacity. */
-    uint64_t max_bytes = c->cfg.cache_bytes;
-    uint32_t max_experts = c->cfg.max_cached_experts;
-    if (max_experts == 0 && max_bytes > 0) {
-        max_experts = (uint32_t)(max_bytes / c->bytes_per_expert);
-    }
-    if (max_experts == 0) max_experts = 8; /* sensible default */
+static uint64_t platform_write(const char *path, uint64_t offset,
+                               uint64_t size, const void *src) {
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_WRITE, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
 
-    while (c->n_resident >= max_experts && c->lru_tail) {
-        expert_slot_t *victim = c->lru_tail;
-        lru_remove(victim);
-        victim->resident = false;
-        c->n_resident--;
-        c->evictions++;
-        c->lru_tail = c->lru_tail->prev;
-        if (c->lru_tail) c->lru_tail->next = NULL;
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)offset;
+    if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) {
+        CloseHandle(h);
+        return 0;
     }
 
-    /* Load (simulated; real backend reads from GGUF file). */
-    s->resident = true;
-    c->n_resident++;
-    lru_push_front(s, &c->lru_head, &c->lru_tail);
-    return true;
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, src, (DWORD)size, &written, NULL);
+    CloseHandle(h);
+    return ok ? (uint64_t)written : 0;
 }
 
-/* ---------------------------------------------------------------------------
- * Prefetch (overlapped loading hint)
- * ------------------------------------------------------------------------- */
-void ct_expert_cache_prefetch(ct_expert_cache_t *c, uint32_t layer, uint32_t expert) {
-    /* In a real backend, this triggers async read-ahead.
-     * For now, just touch with lower priority (no LRU promotion). */
-    if (!c || layer >= c->n_layers || expert >= c->n_experts) return;
-    expert_slot_t *s = &c->slots[layer][expert];
-    if (!s->resident) {
-        /* Non-promoting touch: mark resident but don't move to front. */
-        s->resident = true;
-        s->last_access = ++c->timestamp;
-        c->n_resident++;
-        lru_push_front(s, &c->lru_head, &c->lru_tail);
+#else /* POSIX */
+
+static uint64_t platform_read(const char *path, uint64_t offset,
+                              uint64_t size, void *dst) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    uint64_t n = pread(fd, dst, size, (off_t)offset);
+    close(fd);
+    return n;
+}
+
+static uint64_t platform_write(const char *path, uint64_t offset,
+                               uint64_t size, const void *src) {
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return 0;
+    uint64_t n = pwrite(fd, src, size, (off_t)offset);
+    close(fd);
+    return n;
+}
+
+#endif
+
+/* ── Lifecycle ───────────────────────────────────────────────────────── */
+
+ct_streamer_t *ct_streamer_create(const ct_stream_config_t *cfg) {
+    ct_streamer_t *s = (ct_streamer_t *)calloc(1, sizeof(ct_streamer_t));
+    if (!s) return NULL;
+    if (cfg) {
+        s->cfg = *cfg;
+        if (s->cfg.max_cached_regions == 0 || s->cfg.max_cached_regions > STREAMER_MAX_REGIONS)
+            s->cfg.max_cached_regions = STREAMER_MAX_REGIONS;
+    } else {
+        s->cfg.mode = CT_STREAM_LAZY;
+        s->cfg.cache_bytes = 256 * 1024 * 1024; /* 256MB default */
+        s->cfg.max_cached_regions = 1024;
+        s->cfg.overlap_io = false;
+        s->cfg.prefetch_ahead = 1;
+        s->cfg.ssd_path = NULL;
     }
-}
-
-/* ---------------------------------------------------------------------------
- * Evict LRU
- * ------------------------------------------------------------------------- */
-bool ct_expert_cache_evict_lru(ct_expert_cache_t *c) {
-    if (!c || !c->lru_tail) return false;
-    expert_slot_t *victim = c->lru_tail;
-    lru_remove(victim);
-    victim->resident = false;
-    c->n_resident--;
-    c->evictions++;
-    c->lru_tail = c->lru_tail->prev;
-    if (c->lru_tail) c->lru_tail->next = NULL;
-    return true;
-}
-
-bool ct_expert_cache_is_resident(const ct_expert_cache_t *c, uint32_t layer, uint32_t expert) {
-    if (!c || layer >= c->n_layers || expert >= c->n_experts) return false;
-    return c->slots[layer][expert].resident;
-}
-
-ct_stream_stats_t ct_expert_cache_stats(const ct_expert_cache_t *c) {
-    ct_stream_stats_t s = {0};
-    if (!c) return s;
-    s.hits = c->hits;
-    s.misses = c->misses;
-    s.evictions = c->evictions;
-    s.bytes_resident = c->n_resident * c->bytes_per_expert;
-    s.bytes_streamed = c->misses * c->bytes_per_expert;
-    s.n_experts_resident = c->n_resident;
-    s.n_layers = c->n_layers;
     return s;
 }
 
-uint64_t ct_expert_cache_memory(const ct_expert_cache_t *c) {
-    return c ? c->n_resident * c->bytes_per_expert : 0;
+void ct_streamer_destroy(ct_streamer_t *s) {
+    free(s);
 }
 
-/* ---------------------------------------------------------------------------
- * Budget helper
- * ------------------------------------------------------------------------- */
-uint32_t ct_stream_budget_to_experts(uint64_t budget_bytes,
-                                  uint64_t non_routed_bytes,
-                                  uint64_t kv_bytes,
-                                  uint32_t n_experts,
-                                  uint64_t bytes_per_expert) {
-    if (budget_bytes == 0 || bytes_per_expert == 0) return 0;
-    uint64_t available = budget_bytes;
-    if (available > non_routed_bytes + kv_bytes) {
-        available -= (non_routed_bytes + kv_bytes);
-    } else {
-        return 1; /* at least one expert */
+/* ── Core I/O ────────────────────────────────────────────────────────── */
+
+uint64_t ct_streamer_read(ct_streamer_t *s, const char *weight_name,
+                          uint64_t offset, uint64_t size,
+                          void *dst, bool cache) {
+    if (!s || !weight_name || !dst || size == 0) return 0;
+
+    char path[STREAMER_PATH_MAX];
+    weight_path(path, sizeof(path), s->cfg.ssd_path, weight_name);
+
+    /* Check cache */
+    int ci = find_cache(s, weight_name, offset);
+    if (ci >= 0) {
+        s->cache[ci].last_access_ms = now_ms();
+        s->cache[ci].access_count++;
+        s->stats.cache_hits++;
+        return size; /* already cached */
     }
-    uint32_t n = (uint32_t)(available / bytes_per_expert);
-    if (n > n_experts) n = n_experts;
-    if (n < 1) n = 1;
+    s->stats.cache_misses++;
+
+    /* Evict if needed */
+    while (cache && s->cache_used_bytes + size > s->cfg.cache_bytes &&
+           s->cache_count > 0) {
+        if (!ct_streamer_evict_lru(s)) break;
+    }
+
+    /* Read from disk */
+    uint64_t t0 = now_ms();
+    uint64_t n = platform_read(path, offset, size, dst);
+    uint64_t t1 = now_ms();
+    s->stats.total_io_us += (t1 - t0) * 1000;
+
+    if (n == 0) return 0;
+    s->stats.reads++;
+    s->stats.read_bytes += n;
+
+    /* Cache if requested */
+    if (cache && s->cache_count < s->cfg.max_cached_regions) {
+        int idx = -1;
+        for (uint32_t i = 0; i < s->cfg.max_cached_regions; i++) {
+            if (!s->cache[i].valid) { idx = (int)i; break; }
+        }
+        if (idx >= 0) {
+            strncpy(s->cache[idx].name, weight_name, sizeof(s->cache[idx].name) - 1);
+            s->cache[idx].name[sizeof(s->cache[idx].name) - 1] = '\0';
+            s->cache[idx].offset = offset;
+            s->cache[idx].size = n;
+            s->cache[idx].last_access_ms = t1;
+            s->cache[idx].access_count = 1;
+            s->cache[idx].valid = true;
+            s->cache_count++;
+            s->cache_used_bytes += n;
+        }
+    }
+
     return n;
+}
+
+uint64_t ct_streamer_write(ct_streamer_t *s, const char *weight_name,
+                           uint64_t offset, uint64_t size,
+                           const void *src) {
+    if (!s || !weight_name || !src || size == 0) return 0;
+
+    char path[STREAMER_PATH_MAX];
+    weight_path(path, sizeof(path), s->cfg.ssd_path, weight_name);
+
+    uint64_t t0 = now_ms();
+    uint64_t n = platform_write(path, offset, size, src);
+    uint64_t t1 = now_ms();
+    s->stats.total_io_us += (t1 - t0) * 1000;
+
+    if (n == 0) return 0;
+    s->stats.writes++;
+    s->stats.write_bytes += n;
+    return n;
+}
+
+int ct_streamer_prefetch(ct_streamer_t *s, const char *weight_name,
+                         uint64_t offset, uint64_t size) {
+    if (!s || !weight_name || size == 0) return -1;
+
+    /* Check if already cached */
+    if (find_cache(s, weight_name, offset) >= 0) return 0;
+
+    /* Allocate temp buffer and read */
+    void *buf = malloc(size);
+    if (!buf) return -1;
+
+    uint64_t n = ct_streamer_read(s, weight_name, offset, size, buf, true);
+    free(buf);
+
+    if (n > 0) {
+        s->stats.prefetches++;
+        return 0;
+    }
+    return -1;
+}
+
+/* ── Cache management ────────────────────────────────────────────────── */
+
+bool ct_streamer_cache_mark(ct_streamer_t *s, const char *weight_name) {
+    if (!s || !weight_name) return false;
+    /* Already cached if found */
+    for (uint32_t i = 0; i < s->cache_count; i++) {
+        if (s->cache[i].valid && strcmp(s->cache[i].name, weight_name) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool ct_streamer_is_cached(const ct_streamer_t *s, const char *weight_name) {
+    if (!s || !weight_name) return false;
+    for (uint32_t i = 0; i < s->cache_count; i++) {
+        if (s->cache[i].valid && strcmp(s->cache[i].name, weight_name) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool ct_streamer_evict_lru(ct_streamer_t *s) {
+    if (!s || s->cache_count == 0) return false;
+    int victim = find_lru(s);
+    if (victim < 0) return false;
+
+    s->cache_used_bytes -= s->cache[victim].size;
+    memset(&s->cache[victim], 0, sizeof(ct_cache_entry_t));
+    s->cache_count--;
+    s->stats.evictions++;
+    return true;
+}
+
+/* ── Stats ───────────────────────────────────────────────────────────── */
+
+ct_stream_stats_t ct_streamer_stats(const ct_streamer_t *s) {
+    ct_stream_stats_t zero = {0};
+    return s ? s->stats : zero;
+}
+
+uint64_t ct_streamer_cache_used(const ct_streamer_t *s) {
+    return s ? s->cache_used_bytes : 0;
+}
+
+uint64_t ct_streamer_cache_avail(const ct_streamer_t *s) {
+    return s ? (s->cfg.cache_bytes > s->cache_used_bytes
+                ? s->cfg.cache_bytes - s->cache_used_bytes : 0) : 0;
+}
+
+uint32_t ct_streamer_cache_count(const ct_streamer_t *s) {
+    return s ? s->cache_count : 0;
+}
+
+void ct_streamer_print(const ct_streamer_t *s) {
+    if (!s) { printf("(null streamer)\n"); return; }
+    printf("=== Streamer ===\n");
+    printf("  Mode:      %s\n", s->cfg.mode == CT_STREAM_NONE ? "NONE" :
+                                s->cfg.mode == CT_STREAM_LAZY ? "LAZY" : "PREFETCH");
+    printf("  Cache:     %llu / %llu bytes (%u regions)\n",
+           (unsigned long long)s->cache_used_bytes,
+           (unsigned long long)s->cfg.cache_bytes,
+           s->cache_count);
+    printf("  Reads:     %llu (%llu bytes)\n",
+           (unsigned long long)s->stats.reads,
+           (unsigned long long)s->stats.read_bytes);
+    printf("  Writes:    %llu (%llu bytes)\n",
+           (unsigned long long)s->stats.writes,
+           (unsigned long long)s->stats.write_bytes);
+    printf("  Prefetch:  %llu\n", (unsigned long long)s->stats.prefetches);
+    printf("  Cache hit: %llu  miss: %llu  evict: %llu\n",
+           (unsigned long long)s->stats.cache_hits,
+           (unsigned long long)s->stats.cache_misses,
+           (unsigned long long)s->stats.evictions);
+    printf("  I/O time:  %llu us\n", (unsigned long long)s->stats.total_io_us);
 }

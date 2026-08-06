@@ -41,15 +41,16 @@ static int write_synthetic_gguf(const char *path) {
     fwrite("GGUF", 1, 4, f);
     wr_u32(f, 3);            /* version */
     wr_u64(f, 12);           /* n_tensors */
-    wr_u64(f, 6);            /* n_kv */
+    wr_u64(f, 7);            /* n_kv */
 
-    /* KV metadata (value type = 1 byte, GGUF spec) */
-    wr_str(f, "llama.block_count"); wr_u8(f, 4); wr_u32(f, 1);
-    wr_str(f, "llama.embedding_length"); wr_u8(f, 4); wr_u32(f, 4);
-    wr_str(f, "llama.attention.head_count"); wr_u8(f, 4); wr_u32(f, 2);
-    wr_str(f, "llama.attention.head_count_kv"); wr_u8(f, 4); wr_u32(f, 2);
-    wr_str(f, "llama.vocab_size"); wr_u8(f, 4); wr_u32(f, 8);
-    wr_str(f, "llama.feed_forward_length"); wr_u8(f, 4); wr_u32(f, 8);
+    /* KV metadata */
+    wr_str(f, "general.alignment"); wr_u32(f, 4); wr_u32(f, 1);  /* no padding */
+    wr_str(f, "llama.block_count"); wr_u32(f, 4); wr_u32(f, 1);
+    wr_str(f, "llama.embedding_length"); wr_u32(f, 4); wr_u32(f, 4);
+    wr_str(f, "llama.attention.head_count"); wr_u32(f, 4); wr_u32(f, 2);
+    wr_str(f, "llama.attention.head_count_kv"); wr_u32(f, 4); wr_u32(f, 2);
+    wr_str(f, "llama.vocab_size"); wr_u32(f, 4); wr_u32(f, 8);
+    wr_str(f, "llama.feed_forward_length"); wr_u32(f, 4); wr_u32(f, 8);
 
     /* tensor info (offsets filled after; recompute below) */
     struct { const char *n; uint32_t a, b; } T[12] = {

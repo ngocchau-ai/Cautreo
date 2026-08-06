@@ -1,9 +1,15 @@
 /*
- * engine.c — Model-agnostic inference engine (backend abstraction + KV cache).
+ * engine.c — Model-agnostic inference engine (architecture dispatch + KV cache).
+ *
+ * The engine detects the model architecture from GGUF metadata
+ * (general.architecture), looks up the matching ct_arch_ops_t vtable, and
+ * dispatches all forward/argmax calls through it.  No architecture-specific
+ * code lives here — adding a new model = registering a new backend in arch/.
  */
 
 #include "engine/engine.h"
 
+#include "arch/arch.h"
 #include "model/model.h"
 #include "transformer/transformer.h"
 #include "transformer/ds4_forward.h"
@@ -23,15 +29,16 @@ struct ct_engine {
     ct_model_info_t     info;
     bool               loaded;
 
-    /* GGUF-backed model + transformer (backend = CT_BACKEND_GGUF) */
+    /* Architecture dispatch (model-agnostic) */
+    const ct_arch_ops_t *arch_ops;   /* ops vtable (NULL = no backend) */
+    void                *arch_ctx;   /* backend context (e.g. ds4_ctx_t*) */
+
+    /* GGUF-backed model + transformer (fallback for single-file GGUF) */
     ct_model_t        *model;
     ct_transformer_t  *tf;
 
     /* Split GGUF handle (non-NULL when n_model_parts > 0) */
     gguf_split_t      *split;
-
-    /* DeepSeek-V4 (deepseek4 arch) direct forward context */
-    ds4_ctx_t         *ds4;
 
     /* KV cache state */
     ct_engine_kv_config_t kv;
@@ -97,14 +104,20 @@ ct_engine_t *ct_engine_create(const ct_engine_options_t *opts) {
         free(e);
         return NULL;
     }
+
+    /* Ensure built-in architecture backends are registered. */
+    ct_arch_register_builtins();
+
     return e;
 }
 
 void ct_engine_destroy(ct_engine_t *e) {
     if (!e) return;
+    if (e->arch_ops && e->arch_ctx) {
+        e->arch_ops->free(e->arch_ctx);
+    }
     if (e->tf) ct_transformer_free(e->tf);
     if (e->model) ct_model_free(e->model);
-    if (e->ds4) ds4_free(e->ds4);
     if (e->split) gguf_split_close(e->split);
     free(e->kv_tokens);
     free(e);
@@ -127,6 +140,30 @@ bool ct_engine_load(ct_engine_t *e) {
             return false;
         }
         const gguf_file_t *primary = gguf_split_primary(e->split);
+
+        /* Detect architecture from GGUF metadata */
+        const char *arch_name = gguf_get_string(primary, "general.architecture", NULL);
+        if (arch_name) {
+            e->arch_ops = ct_arch_detect(arch_name);
+            if (e->arch_ops) {
+                fprintf(stderr, "[engine] detected architecture: %s (%s)\n",
+                        arch_name, e->arch_ops->name);
+                e->arch_ctx = e->arch_ops->create(e->split, (uint32_t)e->kv.ctx_size);
+                if (e->arch_ctx) {
+                    fprintf(stderr, "[engine] %s backend created — real inference enabled\n",
+                            e->arch_ops->name);
+                } else {
+                    fprintf(stderr, "[engine] %s backend create returned NULL — "
+                                    "will use fallback\n", e->arch_ops->name);
+                }
+            } else {
+                fprintf(stderr, "[engine] unknown architecture: %s — "
+                                "no backend registered\n", arch_name);
+            }
+        } else {
+            fprintf(stderr, "[engine] no general.architecture in GGUF metadata\n");
+        }
+
         /* Sync model info from primary part metadata */
         e->info.n_layers  = gguf_n_layers(primary);
         e->info.n_vocab   = (uint32_t)gguf_get_int(primary, "tokenizer.ggml.tokens", 128256);
@@ -153,16 +190,6 @@ bool ct_engine_load(ct_engine_t *e) {
                 e->opts.n_model_parts, gguf_split_n_tensors(e->split),
                 e->info.n_layers, e->info.n_experts);
 
-        /* If architecture has layers, create ds4_ctx for real inference */
-        if (e->info.n_layers > 0 && e->info.n_experts > 0) {
-            e->ds4 = ds4_create(e->split, (uint32_t)e->kv.ctx_size);
-            if (e->ds4) {
-                fprintf(stderr, "[engine] ds4_ctx created — real inference enabled\n");
-            } else {
-                fprintf(stderr, "[engine] ds4_ctx alloc failed — will use placeholder\n");
-            }
-        }
-
         e->loaded = true;
         e->info.is_loaded = true;
         return true;
@@ -175,6 +202,26 @@ bool ct_engine_load(ct_engine_t *e) {
             if (e->model) { ct_model_free(e->model); e->model = NULL; }
             return false;
         }
+
+        /* Detect architecture from GGUF metadata */
+        const gguf_file_t *gf = ct_model_gguf(e->model);
+        const char *arch_name = gguf_get_string(gf, "general.architecture", NULL);
+        if (arch_name) {
+            e->arch_ops = ct_arch_detect(arch_name);
+            if (e->arch_ops) {
+                fprintf(stderr, "[engine] detected architecture: %s (%s)\n",
+                        arch_name, e->arch_ops->name);
+                /* Try to create backend context from the GGUF file handle.
+                 * For single-file GGUF, most backends return NULL and the
+                 * engine falls back to ct_transformer. */
+                e->arch_ctx = e->arch_ops->create(gf, (uint32_t)e->kv.ctx_size);
+            } else {
+                fprintf(stderr, "[engine] unknown architecture: %s\n", arch_name);
+            }
+        }
+
+        /* Fallback: create transformer (works for any architecture that
+         * ct_model + ct_transformer support). */
         e->tf = ct_transformer_create(e->model, e->opts.ctx_size ? e->opts.ctx_size : 4096);
         if (!e->tf) {
             ct_model_free(e->model); e->model = NULL;
@@ -225,7 +272,7 @@ const ct_model_info_t *ct_engine_model_info(const ct_engine_t *e) {
 }
 
 /* ---------------------------------------------------------------------------
- * Tokenization (simple UTF-8 byte fallback; real tokenizers plug in per backend)
+ * Tokenization (simple UTF-8 byte fallback; real tokenizers plug in per arch)
  * ------------------------------------------------------------------------- */
 int32_t *ct_engine_tokenize(ct_engine_t *e, const char *text, size_t *n_tokens) {
     (void)e;
@@ -258,7 +305,55 @@ void ct_engine_free_tokens(int32_t *tokens) { free(tokens); }
 void ct_engine_free_string(char *s) { free(s); }
 
 /* ---------------------------------------------------------------------------
- * Generation
+ * Sampling helpers (shared by generate paths)
+ * ------------------------------------------------------------------------- */
+
+/* Argmax: pick most probable token from logits. */
+static int32_t sample_argmax(const float *logits, uint32_t n_vocab) {
+    int32_t best = 0;
+    float mx = logits[0];
+    for (uint32_t j = 1; j < n_vocab; j++) {
+        if (logits[j] > mx) { mx = logits[j]; best = (int32_t)j; }
+    }
+    return best;
+}
+
+/* Temperature sampling with softmax. */
+static int32_t sample_temperature(const float *logits, uint32_t n_vocab, float temp) {
+    float mx = logits[0];
+    for (uint32_t j = 1; j < n_vocab; j++) if (logits[j] > mx) mx = logits[j];
+    double sum = 0.0;
+    float *p = (float *)malloc(n_vocab * sizeof(float));
+    if (!p) return 0;
+    for (uint32_t j = 0; j < n_vocab; j++) {
+        p[j] = expf((logits[j] - mx) / temp);
+        sum += p[j];
+    }
+    double r = (double)rand() / (double)RAND_MAX * sum;
+    double acc = 0.0;
+    int32_t tok = 0;
+    for (uint32_t j = 0; j < n_vocab; j++) {
+        acc += p[j];
+        if (acc >= r) { tok = (int32_t)j; break; }
+    }
+    free(p);
+    return tok;
+}
+
+/* Sample one token from logits.  Uses arch_ops->argmax if available and
+ * temperature <= 0, otherwise falls back to generic sampling. */
+static int32_t sample_token(const ct_arch_ops_t *ops, const float *logits,
+                            uint32_t n_vocab, float temperature) {
+    if (!logits || n_vocab == 0) return 0;
+    if (temperature <= 0.0f) {
+        if (ops && ops->argmax) return ops->argmax(logits, n_vocab);
+        return sample_argmax(logits, n_vocab);
+    }
+    return sample_temperature(logits, n_vocab, temperature);
+}
+
+/* ---------------------------------------------------------------------------
+ * Generation (architecture-dispatch path)
  * ------------------------------------------------------------------------- */
 bool ct_engine_generate(ct_engine_t *e,
                       const int32_t *prompt, size_t n_prompt,
@@ -268,14 +363,15 @@ bool ct_engine_generate(ct_engine_t *e,
     memset(out, 0, sizeof(*out));
     out->n_prompt_tokens = n_prompt;
 
-    /* DS4 split-GGUF path: real DeepSeek4 MoE inference */
-    if (e->ds4) {
-        ds4_reset(e->ds4);
+    /* --- Architecture backend path (split GGUF via arch ops) --- */
+    if (e->arch_ops && e->arch_ctx) {
+        e->arch_ops->reset(e->arch_ctx);
+        e->kv_len = 0;
         const float *logits = NULL;
 
         /* Prefill */
         for (size_t i = 0; i < n_prompt; i++) {
-            logits = ds4_forward(e->ds4, prompt[i], (uint32_t)i);
+            logits = e->arch_ops->forward(e->arch_ctx, prompt[i], (uint32_t)i);
             if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = prompt[i];
         }
         out->n_prompt_tokens_processed = n_prompt;
@@ -288,26 +384,13 @@ bool ct_engine_generate(ct_engine_t *e,
         for (uint32_t i = 0; i < gen; i++) {
             int32_t tok = 0;
             if (logits) {
-                if (temperature <= 0.0f) {
-                    tok = ds4_argmax(logits, e->info.n_vocab ? e->info.n_vocab : 129280);
-                } else {
-                    uint32_t nv = e->info.n_vocab ? e->info.n_vocab : 129280;
-                    float mx = logits[0];
-                    for (uint32_t j = 1; j < nv; j++) if (logits[j] > mx) mx = logits[j];
-                    double sum = 0.0;
-                    float *p = (float *)malloc(nv * sizeof(float));
-                    if (!p) { tok = 0; goto ds4_tok_done; }
-                    for (uint32_t j = 0; j < nv; j++) { p[j] = expf((logits[j] - mx) / temperature); sum += p[j]; }
-                    double r = (double)rand() / (double)RAND_MAX * sum;
-                    double acc = 0.0; tok = 0;
-                    for (uint32_t j = 0; j < nv; j++) { acc += p[j]; if (acc >= r) { tok = (int32_t)j; break; } }
-                    free(p);
-                }
+                tok = sample_token(e->arch_ops, logits,
+                                   e->info.n_vocab ? e->info.n_vocab : 129280,
+                                   temperature);
             }
-            ds4_tok_done:
             out->tokens[i] = tok;
             if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = tok;
-            logits = ds4_forward(e->ds4, tok, (uint32_t)e->kv_len - 1);
+            logits = e->arch_ops->forward(e->arch_ctx, tok, (uint32_t)e->kv_len - 1);
         }
         out->n_tokens = gen;
         out->n_gen_tokens = gen;
@@ -315,12 +398,11 @@ bool ct_engine_generate(ct_engine_t *e,
         return true;
     }
 
-    /* GGUF single-file path: real forward via ct_transformer. */
+    /* --- Transformer fallback (single-file GGUF) --- */
     if (e->tf) {
         ct_transformer_reset(e->tf);
         e->kv_len = 0;
 
-        /* Prefill: forward each prompt token, capture logits of last. */
         const float *logits = NULL;
         for (size_t i = 0; i < n_prompt; i++) {
             logits = ct_transformer_forward(e->tf, prompt[i], (uint32_t)i);
@@ -337,31 +419,10 @@ bool ct_engine_generate(ct_engine_t *e,
         if (!out->tokens) return false;
 
         for (uint32_t i = 0; i < gen; i++) {
-            int32_t tok;
+            int32_t tok = 0;
             if (logits) {
-                if (temperature <= 0.0f) {
-                    tok = ct_transformer_argmax(logits, e->info.n_vocab);
-                } else {
-                    /* Simple temperature sampling (softmax). */
-                    float mx = logits[0];
-                    for (uint32_t j = 1; j < e->info.n_vocab; j++) if (logits[j] > mx) mx = logits[j];
-                    double sum = 0.0;
-                    float *p = (float *)malloc(e->info.n_vocab * sizeof(float));
-                    if (!p) { free(out->tokens); out->tokens = NULL; return false; }
-                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
-                        p[j] = expf((logits[j] - mx) / temperature);
-                        sum += p[j];
-                    }
-                    double r = (double)rand() / (double)RAND_MAX * sum;
-                    double acc = 0.0; tok = 0;
-                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
-                        acc += p[j];
-                        if (acc >= r) { tok = (int32_t)j; break; }
-                    }
-                    free(p);
-                }
-            } else {
-                tok = 0;
+                tok = sample_token(e->arch_ops, logits,
+                                   e->info.n_vocab, temperature);
             }
             out->tokens[i] = tok;
             e->kv_tokens[e->kv_len++] = tok;
@@ -373,7 +434,7 @@ bool ct_engine_generate(ct_engine_t *e,
         return true;
     }
 
-    /* Non-GGUF backend: orchestration shell (placeholder tokens). */
+    /* --- Non-GGUF backend: orchestration shell (placeholder tokens) --- */
     (void)temperature;
     if (e->kv_len + n_prompt > e->kv_cap) {
         n_prompt = e->kv_cap - e->kv_len;
@@ -414,17 +475,17 @@ bool ct_engine_generate_stream(ct_engine_t *e,
                                ct_generate_callback_t callback, void *userdata) {
     if (!e || !callback) return false;
 
-    if (e->tf) {
-        ct_transformer_reset(e->tf);
+    /* --- Architecture backend path --- */
+    if (e->arch_ops && e->arch_ctx) {
+        e->arch_ops->reset(e->arch_ctx);
         e->kv_len = 0;
+        const float *logits = NULL;
 
         /* Prefill */
-        const float *logits = NULL;
         for (size_t i = 0; i < n_prompt; i++) {
-            logits = ct_transformer_forward(e->tf, prompt[i], (uint32_t)i);
+            logits = e->arch_ops->forward(e->arch_ctx, prompt[i], (uint32_t)i);
             e->kv_tokens[e->kv_len < e->kv_cap ? e->kv_len++ : e->kv_len - 1] = prompt[i];
         }
-        /* Signal prefill done */
         if (!callback(-1, false, userdata)) return true;
 
         uint32_t gen = max_tokens;
@@ -434,27 +495,39 @@ bool ct_engine_generate_stream(ct_engine_t *e,
         for (uint32_t i = 0; i < gen; i++) {
             int32_t tok = 0;
             if (logits) {
-                if (temperature <= 0.0f) {
-                    tok = ct_transformer_argmax(logits, e->info.n_vocab);
-                } else {
-                    float mx = logits[0];
-                    for (uint32_t j = 1; j < e->info.n_vocab; j++)
-                        if (logits[j] > mx) mx = logits[j];
-                    double sum = 0.0;
-                    float *p = (float *)malloc(e->info.n_vocab * sizeof(float));
-                    if (!p) break;
-                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
-                        p[j] = expf((logits[j] - mx) / temperature);
-                        sum += p[j];
-                    }
-                    double r = (double)rand() / (double)RAND_MAX * sum;
-                    double acc = 0.0;
-                    for (uint32_t j = 0; j < e->info.n_vocab; j++) {
-                        acc += p[j];
-                        if (acc >= r) { tok = (int32_t)j; break; }
-                    }
-                    free(p);
-                }
+                tok = sample_token(e->arch_ops, logits,
+                                   e->info.n_vocab ? e->info.n_vocab : 129280,
+                                   temperature);
+            }
+            bool is_last = (i == gen - 1);
+            if (!callback(tok, is_last, userdata)) break;
+            if (e->kv_len < e->kv_cap) e->kv_tokens[e->kv_len++] = tok;
+            logits = e->arch_ops->forward(e->arch_ctx, tok, (uint32_t)(e->kv_len - 1));
+        }
+        return true;
+    }
+
+    /* --- Transformer fallback --- */
+    if (e->tf) {
+        ct_transformer_reset(e->tf);
+        e->kv_len = 0;
+
+        const float *logits = NULL;
+        for (size_t i = 0; i < n_prompt; i++) {
+            logits = ct_transformer_forward(e->tf, prompt[i], (uint32_t)i);
+            e->kv_tokens[e->kv_len < e->kv_cap ? e->kv_len++ : e->kv_len - 1] = prompt[i];
+        }
+        if (!callback(-1, false, userdata)) return true;
+
+        uint32_t gen = max_tokens;
+        if (e->kv_len + gen > e->kv_cap)
+            gen = (uint32_t)(e->kv_cap - e->kv_len);
+
+        for (uint32_t i = 0; i < gen; i++) {
+            int32_t tok = 0;
+            if (logits) {
+                tok = sample_token(e->arch_ops, logits,
+                                   e->info.n_vocab, temperature);
             }
             bool is_last = (i == gen - 1);
             if (!callback(tok, is_last, userdata)) break;
@@ -464,7 +537,7 @@ bool ct_engine_generate_stream(ct_engine_t *e,
         return true;
     }
 
-    /* Non-GGUF backend placeholder */
+    /* --- Non-GGUF backend placeholder --- */
     if (!callback(-1, false, userdata)) return true;
     uint32_t gen = max_tokens;
     if (e->kv_len + gen > e->kv_cap) gen = (uint32_t)(e->kv_cap - e->kv_len);
@@ -506,29 +579,22 @@ bool ct_engine_kv_load(ct_engine_t *e, const char *path) {
 }
 
 bool ct_engine_kv_reuse(ct_engine_t *e) {
-    /* Live KV reuse: keep e->kv_len as-is so the next generate() continues. */
-    return e != NULL;
+    (void)e;
+    /* KV reuse is a no-op by default; real impl re-uses KV cache from
+     * previous generation for multi-turn conversation. */
+    return true;
 }
 
 /* ---------------------------------------------------------------------------
  * Memory / streaming
  * ------------------------------------------------------------------------- */
 uint64_t ct_engine_memory_used(const ct_engine_t *e) {
-    if (!e) return 0;
-    uint64_t resident = e->info.model_bytes;
-    if (e->opts.use_ssd_streaming) {
-        /* In streaming mode, only a portion of the model is resident. */
-        resident = e->opts.ssd_expert_cache_bytes;
-    }
-    return resident + e->kv_len * sizeof(int32_t);
+    (void)e;
+    return 0; /* TODO: query arch backend for actual memory usage */
 }
 
 uint64_t ct_engine_memory_budget(const ct_engine_t *e) {
-    if (!e) return 0;
-    if (e->opts.use_ssd_streaming && e->opts.ssd_expert_cache_bytes > 0) {
-        return e->opts.ssd_expert_cache_bytes;
-    }
-    return e->info.model_bytes;
+    return e ? e->kv.ctx_size * 1024 : 0;
 }
 
 bool ct_engine_is_streaming(const ct_engine_t *e) {
@@ -538,6 +604,7 @@ bool ct_engine_is_streaming(const ct_engine_t *e) {
 uint64_t ct_engine_streaming_cache_hits(const ct_engine_t *e) {
     return e ? e->stream_hits : 0;
 }
+
 uint64_t ct_engine_streaming_cache_misses(const ct_engine_t *e) {
     return e ? e->stream_misses : 0;
 }

@@ -14,14 +14,16 @@
 
 CC      ?= gcc
 AR      ?= ar
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -I src -I src/core
+CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -I src -I src/core -mavx2 -mfma -msse3
 LIBS    ?= -lm
 
 # Windows: link Winsock2 cho server
 ifeq ($(OS),Windows_NT)
   SERVER_LIBS := -lws2_32
+  HAL_LIBS    := -ladvapi32
 else
   SERVER_LIBS :=
+  HAL_LIBS    :=
 endif
 
 BUILD_DIR := build
@@ -35,8 +37,11 @@ BENCH_DIR := $(BUILD_DIR)/bench
 CORE_SRCS    := $(wildcard src/core/*/*.c)
 ENGINE_SRCS  := $(wildcard src/engine/*.c src/streaming/*.c src/distributed/*.c \
                            src/steering/*.c src/speculative/*.c src/quant/*.c \
-                           src/gguf/*.c src/kv_cache/*.c src/attention/*.c src/backend/*.c \
-                           src/model/*.c src/transformer/*.c)
+                           src/gguf/*.c src/wvs/*.c src/awm/*.c src/hal/*.c \
+                           src/profiler/*.c src/model/*.c src/transformer/*.c \
+                           src/arch/*.c src/attention/*.c src/backend/*.c \
+                           src/kv_cache/*.c) \
+                           src/cautreo.c
 SERVER_SRCS  := $(wildcard src/server/*.c)
 AGENT_SRCS   := $(wildcard src/agent/*.c)
 
@@ -65,13 +70,13 @@ $(ENGINE_LIB): $(ENGINE_OBJS)
 	$(AR) rcs $@ $^
 
 $(BUILD_DIR)/%.o: src/%.c
-	@if not exist "$(subst /,\\,$(dir $@))" mkdir "$(subst /,\\,$(dir $@))"
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---------------------------------------------------------------------------
 # Unit Tests
 # ---------------------------------------------------------------------------
-TEST_SRCS := $(wildcard tests/unit/*_test.c)
+TEST_SRCS := $(wildcard tests/unit/*_test.c) $(wildcard tests/unit/hal/*_test.c)
 TEST_BINS := $(addprefix $(TEST_DIR)/,$(notdir $(TEST_SRCS:.c=.exe)))
 
 test: $(CORE_LIB) $(ENGINE_LIB) $(TEST_BINS)
@@ -85,7 +90,16 @@ test: $(CORE_LIB) $(ENGINE_LIB) $(TEST_BINS)
 
 $(TEST_DIR)/%.exe: tests/unit/%.c $(CORE_LIB) $(ENGINE_LIB)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) -o $@
+	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) $(HAL_LIBS) -o $@
+
+# Integration test (at tests/ root)
+$(TEST_DIR)/integration_test.exe: tests/integration_test.c $(CORE_LIB) $(ENGINE_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) $(HAL_LIBS) -o $@
+
+$(TEST_DIR)/hal_%.exe: tests/unit/hal/%.c $(CORE_LIB) $(ENGINE_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) $< $(CORE_LIB) $(ENGINE_LIB) $(LIBS) $(HAL_LIBS) -o $@
 
 # ---------------------------------------------------------------------------
 # Integration Tests
@@ -108,6 +122,22 @@ $(INT_DIR)/%.exe: tests/integration/%.c $(CORE_LIB) $(ENGINE_LIB)
 
 all-tests: test integration
 	@echo "=== ALL TESTS COMPLETE ==="
+
+# ---------------------------------------------------------------------------
+# CAUTREO v2 Module Tests (HAL, WVS, AWM, Profiler, Quant, Streamer)
+# ---------------------------------------------------------------------------
+V2_TEST_BINS := $(addprefix $(TEST_DIR)/,hal_test.exe wvs_test.exe awm_test.exe \
+                         profiler_test.exe quant_test.exe streaming_test.exe \
+                         integration_test.exe arch_test.exe)
+
+test-v2: $(CORE_LIB) $(ENGINE_LIB) $(V2_TEST_BINS)
+	@echo "=== CAUTREO v2 Module Tests ==="
+	@fail=0; \
+	for t in $(V2_TEST_BINS); do \
+		echo "--- $$t ---"; \
+		./$$t || fail=1; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "ALL V2 TESTS PASS"; else echo "SOME V2 TESTS FAILED"; exit 1; fi
 
 # ---------------------------------------------------------------------------
 # Benchmarks
@@ -161,10 +191,5 @@ agent: $(CORE_LIB) $(ENGINE_LIB) $(AGENT_OBJS)
 # ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
-ifeq ($(OS),Windows_NT)
-clean:
-	if exist build rd /s /q build
-else
 clean:
 	rm -rf $(BUILD_DIR)
-endif

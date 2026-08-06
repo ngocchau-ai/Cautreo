@@ -1,89 +1,116 @@
-#ifndef CAUTREO_QUANT_H
-#define CAUTREO_QUANT_H
+#ifndef CT_QUANT_H
+#define CT_QUANT_H
 
 /*
- * quant.h — Routed-expert asymmetric quantization (từ DS4).
+ * quant.h — Quantization module (CAUTREO v2)
  *
- * Chỉ quantize routed MoE experts, giữ shared experts/projections/routing nguyên vẹn
- * để đảm bảo chất lượng. Model-agnostic: áp dụng cho bất kỳ MoE model nào.
+ * 5 mức precision: FP16 (passthrough), Q8 (8-bit), Q4 (4-bit), Q2 (2-bit), Q1 (1-bit)
+ * Block format: mỗi block 32 floats → 1 scale (fp16) + N bytes payload.
  */
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* ── Block sizes (32 floats per block) ──────────────────────────────── */
+
+#define CT_QUANT_BLOCK_SIZE 32
+
+/* Q8_0: 1 fp16 scale + 32 int8 = 34 bytes per 32 floats */
+typedef struct {
+    uint16_t d;  /* scale (fp16 bits) */
+    int8_t   q[CT_QUANT_BLOCK_SIZE];
+} ct_q8_0_block_t;
+
+/* Q4_0: 1 fp16 scale + 16 bytes (2×4-bit per byte) = 18 bytes per 32 floats */
+typedef struct {
+    uint16_t d;
+    uint8_t  q[CT_QUANT_BLOCK_SIZE / 2];
+} ct_q4_0_block_t;
+
+/* Q2_0: 1 fp16 scale + 8 bytes (4×2-bit per byte) = 10 bytes per 32 floats */
+typedef struct {
+    uint16_t d;
+    uint8_t  q[CT_QUANT_BLOCK_SIZE / 4];
+} ct_q2_0_block_t;
+
+/* Q1_0: 1 fp16 scale + 4 bytes (8×1-bit per byte) = 6 bytes per 32 floats */
+typedef struct {
+    uint16_t d;
+    uint8_t  q[CT_QUANT_BLOCK_SIZE / 8];
+} ct_q1_0_block_t;
+
+/* ── Quantization types ──────────────────────────────────────────────── */
+
 typedef enum {
-    CT_QUANT_F32 = 0,     /* no quantization */
-    CT_QUANT_Q2_K,          /* 2-bit, routed experts */
-    CT_QUANT_Q4_K,          /* 4-bit, routed experts */
-    CT_QUANT_Q5_K,          /* 5-bit, routed experts */
-    CT_QUANT_Q6_K,          /* 6-bit, routed experts */
-    CT_QUANT_IQ2_XXS,       /* 2-bit, routed experts (gate/up) */
-    CT_QUANT_MXFP4,          /* native MXFP4 experts */
-} ct_quant_t;
+    CT_QUANT_FP16 = 0,  /* passthrough (no compression) */
+    CT_QUANT_Q8_0 = 1,  /* 8-bit  — semi-hot */
+    CT_QUANT_Q4_0 = 2,  /* 4-bit  — warm */
+    CT_QUANT_Q2_0 = 3,  /* 2-bit  — cold */
+    CT_QUANT_Q1_0 = 4,  /* 1-bit  — rare (SSD) */
+} ct_quant_type_t;
 
-typedef struct {
-    ct_quant_t expert_quant;   /* routed experts */
-    ct_quant_t dense_quant;     /* shared experts, projections, routing (thường F32/Q8) */
-    bool       use_imatrix;      /* importance-matrix calibration */
-    uint32_t   last_layers_q4;  /* n layer cuối ở Q4 (q2-q4 hybrid) */
-} ct_quant_config_t;
+/* Bytes per float for each type */
+static inline size_t ct_quant_bytes_per_float(ct_quant_type_t t) {
+    switch (t) {
+        case CT_QUANT_FP16: return 2;
+        case CT_QUANT_Q8_0: return sizeof(ct_q8_0_block_t) / CT_QUANT_BLOCK_SIZE; /* 1.0625 */
+        case CT_QUANT_Q4_0: return sizeof(ct_q4_0_block_t) / CT_QUANT_BLOCK_SIZE; /* 0.5625 */
+        case CT_QUANT_Q2_0: return sizeof(ct_q2_0_block_t) / CT_QUANT_BLOCK_SIZE; /* 0.3125 */
+        case CT_QUANT_Q1_0: return sizeof(ct_q1_0_block_t) / CT_QUANT_BLOCK_SIZE; /* 0.1875 */
+        default: return 4; /* FP32 fallback */
+    }
+}
 
-/* ---------------------------------------------------------------------------
- * Quantization block (block-wise scale, GGUF-compatible layout)
- * ------------------------------------------------------------------------- */
-typedef struct {
-    uint32_t block_size;      /* e.g. 256 for Q4_K */
-    uint32_t n_blocks;
-    float   *scales;         /* per-block scale */
-    float   *mins;           /* per-block min (Q4_K) */
-    uint8_t *quant_data;     /* quantized values */
-    uint64_t n_values;
-} ct_quant_block_t;
+/* ── Quantize ────────────────────────────────────────────────────────── */
 
-/* Quantize a float tensor to the given format. Returns true on success. */
-bool ct_quantize(const float *src, uint64_t n, ct_quant_t q, ct_quant_block_t *out);
+/* Quantize n floats → Q8_0 blocks. n must be multiple of 32. */
+void ct_quant_q8_0(const float *src, ct_q8_0_block_t *dst, int64_t n);
 
-/* Dequantize back to float. */
-bool ct_dequantize(const ct_quant_block_t *in, float *dst, uint64_t n);
+/* Quantize n floats → Q4_0 blocks */
+void ct_quant_q4_0(const float *src, ct_q4_0_block_t *dst, int64_t n);
 
-/* Free a quant block. */
-void ct_quant_free(ct_quant_block_t *b);
+/* Quantize n floats → Q2_0 blocks */
+void ct_quant_q2_0(const float *src, ct_q2_0_block_t *dst, int64_t n);
 
-/* Sizes */
-uint64_t ct_quant_size_bytes(const ct_quant_block_t *b);
-uint64_t ct_quant_original_bytes(const ct_quant_block_t *b);
-double   ct_quant_ratio(const ct_quant_block_t *b);
+/* Quantize n floats → Q1_0 blocks */
+void ct_quant_q1_0(const float *src, ct_q1_0_block_t *dst, int64_t n);
 
-/* ---------------------------------------------------------------------------
- * Model-level policy
- * ------------------------------------------------------------------------- */
-typedef struct {
-    uint64_t n_experts;          /* routed experts */
-    uint64_t n_shared;           /* shared experts + projections + routing */
-    uint64_t bytes_per_expert_f32; /* expert size in F32 */
-} ct_quant_model_t;
+/* ── Dequantize ──────────────────────────────────────────────────────── */
 
-/* Tính dung lượng model sau asymmetric quantization. */
-uint64_t ct_quant_model_size(const ct_quant_model_t *m, const ct_quant_config_t *cfg);
+/* Dequantize Q8_0 blocks → n floats */
+void ct_quant_deq8_0(const ct_q8_0_block_t *src, float *dst, int64_t n);
 
-/* ---------------------------------------------------------------------------
- * Quality estimation (imatrix-based)
- * ------------------------------------------------------------------------- */
-typedef struct {
-    double   activation_ratio;    /* fraction of activations captured */
-    double   quality_score;        /* 0..1 */
-    uint64_t n_calibration_tokens;
-} ct_quant_quality_t;
+/* Dequantize Q4_0 blocks → n floats */
+void ct_quant_deq4_0(const ct_q4_0_block_t *src, float *dst, int64_t n);
 
-ct_quant_quality_t ct_quant_estimate_quality(ct_quant_t q);
+/* Dequantize Q2_0 blocks → n floats */
+void ct_quant_deq2_0(const ct_q2_0_block_t *src, float *dst, int64_t n);
+
+/* Dequantize Q1_0 blocks → n floats */
+void ct_quant_deq1_0(const ct_q1_0_block_t *src, float *dst, int64_t n);
+
+/* ── Generic dispatch ────────────────────────────────────────────────── */
+
+/* Quantize n floats → output buffer (type-specific). Returns bytes written. */
+size_t ct_quant_do(const float *src, void *dst, int64_t n, ct_quant_type_t type);
+
+/* Dequantize from type-specific buffer → n floats. */
+void ct_quant_undo(const void *src, float *dst, int64_t n, ct_quant_type_t type);
+
+/* ── Utilities ───────────────────────────────────────────────────────── */
+
+/* Convert float to fp16 bits (round-to-nearest-even) */
+uint16_t ct_quant_f32_to_fp16(float f);
+
+/* Convert fp16 bits to float */
+float ct_quant_fp16_to_f32(uint16_t h);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* CAUTREO_QUANT_H */
+#endif /* CT_QUANT_H */

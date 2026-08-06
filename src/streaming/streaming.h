@@ -2,11 +2,10 @@
 #define CAUTREO_STREAMING_H
 
 /*
- * streaming.h — SSD streaming (chạy model lớn hơn RAM).
+ * streaming.h — SSD streaming engine (CAUTREO v2)
  *
- * Ý tưởng lõi của WASTE (Weight-Aware Streaming Tensor), được DS4 xác nhận khả thi:
- * non-routed weights resident trong RAM, routed MoE experts stream từ disk theo cache-miss.
- * Module này quản lý expert cache + policy, model-agnostic.
+ * Quản lý I/O giữa RAM và SSD cho trọng số rare/cold.
+ * Hỗ trợ prefetch, LRU eviction, thống kê throughput.
  */
 
 #include <stdbool.h>
@@ -17,73 +16,84 @@
 extern "C" {
 #endif
 
-/* ---------------------------------------------------------------------------
- * Streaming policy
- * ------------------------------------------------------------------------- */
+/* ── Streaming mode ──────────────────────────────────────────────────── */
+
 typedef enum {
-    CT_STREAM_NONE = 0,     /* tất cả resident (model vừa RAM) */
-    CT_STREAM_ROUTED,         /* chỉ routed experts stream (dense/shared resident) */
-    CT_STREAM_LAYERS,         /* stream theo layer (pipeline) */
+    CT_STREAM_NONE = 0,   /* tất cả resident (model vừa RAM) */
+    CT_STREAM_LAZY,        /* load-on-demand khi cache miss */
+    CT_STREAM_PREFETCH,    /* prefetch dựa trên profiler heatmap */
 } ct_stream_mode_t;
+
+/* ── Config ──────────────────────────────────────────────────────────── */
 
 typedef struct {
     ct_stream_mode_t mode;
-    uint64_t        cache_bytes;        /* expert cache budget */
-    uint32_t        max_cached_experts;/* 0 = auto từ cache_bytes */
-    bool            overlap_prefill;     /* prefetch layer i+1 trong khi infer layer i */
-    uint32_t        prefetch_ahead;    /* số expert prefetch trước */
+    uint64_t         cache_bytes;       /* RAM budget cho streaming cache */
+    uint32_t         max_cached_regions;/* 0 = auto từ cache_bytes */
+    bool             overlap_io;        /* async I/O (nếu platform hỗ trợ) */
+    uint32_t         prefetch_ahead;    /* số region prefetch trước */
+    const char      *ssd_path;          /* đường dẫn gốc cho weight files */
 } ct_stream_config_t;
 
-/* ---------------------------------------------------------------------------
- * Expert cache handle (opaque)
- * ------------------------------------------------------------------------- */
-typedef struct ct_expert_cache ct_expert_cache_t;
+/* ── Stats ───────────────────────────────────────────────────────────── */
 
 typedef struct {
-    uint64_t hits;
-    uint64_t misses;
+    uint64_t reads;
+    uint64_t writes;
+    uint64_t read_bytes;
+    uint64_t write_bytes;
+    uint64_t prefetches;
+    uint64_t cache_hits;
+    uint64_t cache_misses;
     uint64_t evictions;
-    uint64_t bytes_resident;
-    uint64_t bytes_streamed;
-    uint32_t n_experts_resident;
-    uint32_t n_layers;
+    uint64_t total_io_us;    /* microseconds spent in I/O */
 } ct_stream_stats_t;
 
-/* ---------------------------------------------------------------------------
- * Expert cache API
- * ------------------------------------------------------------------------- */
-ct_expert_cache_t *ct_expert_cache_create(const ct_stream_config_t *cfg,
-                                       uint32_t n_layers, uint32_t n_experts,
-                                       uint64_t bytes_per_expert);
-void ct_expert_cache_destroy(ct_expert_cache_t *c);
+/* ── Opaque handle ───────────────────────────────────────────────────── */
 
-/* Mark an expert resident (load from disk on miss). Returns true if resident after call. */
-bool ct_expert_cache_touch(ct_expert_cache_t *c, uint32_t layer, uint32_t expert);
+typedef struct ct_streamer_s ct_streamer_t;
 
-/* Hint the cache to prefetch an expert (overlapped loading). */
-void ct_expert_cache_prefetch(ct_expert_cache_t *c, uint32_t layer, uint32_t expert);
+/* ── Lifecycle ───────────────────────────────────────────────────────── */
 
-/* Evict least-recently-used expert to free memory. */
-bool ct_expert_cache_evict_lru(ct_expert_cache_t *c);
+ct_streamer_t *ct_streamer_create(const ct_stream_config_t *cfg);
+void           ct_streamer_destroy(ct_streamer_t *s);
 
-/* Is this expert currently resident? */
-bool ct_expert_cache_is_resident(const ct_expert_cache_t *c, uint32_t layer, uint32_t expert);
+/* ── Core I/O ────────────────────────────────────────────────────────── */
 
-/* Stats */
-ct_stream_stats_t ct_expert_cache_stats(const ct_expert_cache_t *c);
+/* Read weight data from SSD. Returns bytes read, or 0 on error.
+ * If `cache` is true, the data is kept in the streaming cache. */
+uint64_t ct_streamer_read(ct_streamer_t *s, const char *weight_name,
+                          uint64_t offset, uint64_t size,
+                          void *dst, bool cache);
 
-/* Memory footprint of the cache */
-uint64_t ct_expert_cache_memory(const ct_expert_cache_t *c);
+/* Write weight data to SSD. Returns bytes written, or 0 on error. */
+uint64_t ct_streamer_write(ct_streamer_t *s, const char *weight_name,
+                           uint64_t offset, uint64_t size,
+                           const void *src);
 
-/* ---------------------------------------------------------------------------
- * Memory budget helper
- * ------------------------------------------------------------------------- */
-/* Tính số expert cache được phép từ budget bytes (trừ headroom cho non-routed + KV). */
-uint32_t ct_stream_budget_to_experts(uint64_t budget_bytes,
-                                  uint64_t non_routed_bytes,
-                                  uint64_t kv_bytes,
-                                  uint32_t n_experts,
-                                  uint64_t bytes_per_expert);
+/* Prefetch: hint that weight_name will be needed soon.
+ * Returns 0 on success, -1 if prefetch not supported. */
+int ct_streamer_prefetch(ct_streamer_t *s, const char *weight_name,
+                         uint64_t offset, uint64_t size);
+
+/* ── Cache management ────────────────────────────────────────────────── */
+
+/* Mark a weight as cached (resident in RAM after read). */
+bool ct_streamer_cache_mark(ct_streamer_t *s, const char *weight_name);
+
+/* Check if a weight is currently cached. */
+bool ct_streamer_is_cached(const ct_streamer_t *s, const char *weight_name);
+
+/* Evict least-recently-used cached region. Returns true if evicted. */
+bool ct_streamer_evict_lru(ct_streamer_t *s);
+
+/* ── Stats ───────────────────────────────────────────────────────────── */
+
+ct_stream_stats_t ct_streamer_stats(const ct_streamer_t *s);
+uint64_t          ct_streamer_cache_used(const ct_streamer_t *s);
+uint64_t          ct_streamer_cache_avail(const ct_streamer_t *s);
+uint32_t          ct_streamer_cache_count(const ct_streamer_t *s);
+void              ct_streamer_print(const ct_streamer_t *s);
 
 #ifdef __cplusplus
 }

@@ -1,187 +1,286 @@
 /*
- * quant.c — Routed-expert asymmetric quantization.
+ * quant.c — Quantization module (CAUTREO v2)
+ *
+ * 5 mức precision: FP16, Q8 (8-bit), Q4 (4-bit), Q2 (2-bit), Q1 (1-bit).
+ * Block format: mỗi block 32 floats → 1 scale (fp16) + N bytes payload.
+ * Symmetric quantization: scale = max(|x|), q = round(x / scale * 127).
  */
 
 #include "quant/quant.h"
-
 #include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
-/* Block sizes per quant type */
-static uint32_t quant_block_size(ct_quant_t q) {
-    switch (q) {
-        case CT_QUANT_Q2_K:    return 256;
-        case CT_QUANT_Q4_K:    return 256;
-        case CT_QUANT_Q5_K:    return 256;
-        case CT_QUANT_Q6_K:    return 256;
-        case CT_QUANT_IQ2_XXS: return 256;
-        case CT_QUANT_MXFP4:    return 32;
-        case CT_QUANT_F32:
-        default:                 return 1;
-    }
-}
+/* ── FP16 conversion (IEEE 754) ──────────────────────────────────────── */
 
-static uint32_t quant_bits_per_value(ct_quant_t q) {
-    switch (q) {
-        case CT_QUANT_Q2_K:    return 2;
-        case CT_QUANT_Q4_K:    return 4;
-        case CT_QUANT_Q5_K:    return 5;
-        case CT_QUANT_Q6_K:    return 6;
-        case CT_QUANT_IQ2_XXS: return 2;
-        case CT_QUANT_MXFP4:    return 4;
-        case CT_QUANT_F32:
-        default:                 return 32;
-    }
-}
+uint16_t ct_quant_f32_to_fp16(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 31) & 1;
+    uint32_t exp  = (u >> 23) & 0xFF;
+    uint32_t frac = u & 0x7FFFFF;
 
-bool ct_quantize(const float *src, uint64_t n, ct_quant_t q, ct_quant_block_t *out) {
-    if (!src || !out) return false;
-    memset(out, 0, sizeof(*out));
-
-    if (q == CT_QUANT_F32) {
-        out->block_size = 1;
-        out->n_blocks = (uint32_t)n;
-        out->quant_data = (uint8_t *)malloc(n * sizeof(float));
-        if (!out->quant_data) return false;
-        memcpy(out->quant_data, src, n * sizeof(float));
-        out->n_values = n;
-        return true;
-    }
-
-    uint32_t bs = quant_block_size(q);
-    uint32_t n_blocks = (uint32_t)((n + bs - 1) / bs);
-    out->block_size = bs;
-    out->n_blocks = n_blocks;
-    out->n_values = n;
-
-    out->scales = (float *)malloc(n_blocks * sizeof(float));
-    out->mins = (float *)malloc(n_blocks * sizeof(float));
-    uint32_t bits = quant_bits_per_value(q);
-    out->quant_data = (uint8_t *)calloc((n * bits + 7) / 8, 1);
-    if (!out->scales || !out->mins || !out->quant_data) {
-        ct_quant_free(out);
-        return false;
-    }
-
-    /* Block-wise min-max quantization */
-    for (uint32_t b = 0; b < n_blocks; b++) {
-        uint64_t start = (uint64_t)b * bs;
-        uint64_t end = start + bs;
-        if (end > n) end = n;
-
-        float mn = src[start], mx = src[start];
-        for (uint64_t i = start; i < end; i++) {
-            if (src[i] < mn) mn = src[i];
-            if (src[i] > mx) mx = src[i];
+    uint16_t h;
+    if (exp == 0) {
+        /* Zero / subnormal */
+        h = (uint16_t)(sign << 15);
+    } else if (exp == 0xFF) {
+        /* Inf / NaN */
+        h = (uint16_t)((sign << 15) | 0x7C00 | (frac >> 13));
+    } else {
+        /* Normal: round-to-nearest-even */
+        uint32_t new_exp = exp - 127 + 15;
+        if (new_exp >= 31) {
+            /* Overflow → Inf */
+            h = (uint16_t)((sign << 15) | 0x7C00);
+        } else if (new_exp <= 0) {
+            /* Underflow → subnormal or zero */
+            frac = (frac | 0x800000) >> (1 - new_exp);
+            h = (uint16_t)((sign << 15) | (frac >> 13));
+        } else {
+            h = (uint16_t)((sign << 15) | (new_exp << 10) | (frac >> 13));
         }
-        out->mins[b] = mn;
-        float scale = (mx - mn) > 0 ? (mx - mn) / (float)((1 << bits) - 1) : 0.0f;
-        out->scales[b] = scale;
+    }
+    return h;
+}
 
-        for (uint64_t i = start; i < end; i++) {
-            uint32_t qv = scale > 0 ? (uint32_t)((src[i] - mn) / scale) : 0;
-            if (qv >= (1u << bits)) qv = (1u << bits) - 1;
-            /* pack bits */
-            for (uint32_t bit = 0; bit < bits; bit++) {
-                if (qv & (1u << bit)) {
-                    uint64_t pos = i * bits + bit;
-                    out->quant_data[pos / 8] |= (uint8_t)(1u << (pos % 8));
-                }
+float ct_quant_fp16_to_f32(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t frac = h & 0x3FF;
+
+    uint32_t u;
+    if (exp == 0) {
+        /* Zero / subnormal */
+        if (frac == 0) {
+            u = sign << 31;
+        } else {
+            /* Subnormal → normalize */
+            uint32_t mag = frac;
+            uint32_t norm_exp = 112; /* -14 + 127 - 1 */
+            while (!(mag & 0x400)) { mag <<= 1; norm_exp--; }
+            u = (sign << 31) | (norm_exp << 23) | ((mag & 0x3FF) << 13);
+        }
+    } else if (exp == 31) {
+        /* Inf / NaN */
+        u = (sign << 31) | 0x7F800000 | (frac << 13);
+    } else {
+        u = (sign << 31) | ((exp + 112) << 23) | (frac << 13);
+    }
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+/* ── Q8_0: 8-bit symmetric ───────────────────────────────────────────── */
+
+void ct_quant_q8_0(const float *src, ct_q8_0_block_t *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const float *x = src + b * CT_QUANT_BLOCK_SIZE;
+        ct_q8_0_block_t *blk = dst + b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            float a = fabsf(x[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        blk->d = ct_quant_f32_to_fp16(d);
+
+        float id = d > 0 ? 1.0f / d : 0;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            int q = (int)(floorf(x[i] * id + 0.5f));
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            blk->q[i] = (int8_t)q;
+        }
+    }
+}
+
+void ct_quant_deq8_0(const ct_q8_0_block_t *src, float *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const ct_q8_0_block_t *blk = src + b;
+        float *x = dst + b * CT_QUANT_BLOCK_SIZE;
+        float d = ct_quant_fp16_to_f32(blk->d);
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            x[i] = (float)blk->q[i] * d;
+        }
+    }
+}
+
+/* ── Q4_0: 4-bit symmetric ───────────────────────────────────────────── */
+
+void ct_quant_q4_0(const float *src, ct_q4_0_block_t *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const float *x = src + b * CT_QUANT_BLOCK_SIZE;
+        ct_q4_0_block_t *blk = dst + b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            float a = fabsf(x[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 7.0f;
+        blk->d = ct_quant_f32_to_fp16(d);
+
+        float id = d > 0 ? 1.0f / d : 0;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 2) {
+            int q0 = (int)(floorf(x[i] * id + 0.5f));
+            int q1 = (int)(floorf(x[i+1] * id + 0.5f));
+            if (q0 > 7) q0 = 7; if (q0 < -7) q0 = -7;
+            if (q1 > 7) q1 = 7; if (q1 < -7) q1 = -7;
+            blk->q[i/2] = (uint8_t)((q0 & 0xF) | ((q1 & 0xF) << 4));
+        }
+    }
+}
+
+void ct_quant_deq4_0(const ct_q4_0_block_t *src, float *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const ct_q4_0_block_t *blk = src + b;
+        float *x = dst + b * CT_QUANT_BLOCK_SIZE;
+        float d = ct_quant_fp16_to_f32(blk->d);
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 2) {
+            uint8_t p = blk->q[i/2];
+            int q0 = (int)(p & 0xF);
+            int q1 = (int)((p >> 4) & 0xF);
+            /* Sign-extend 4-bit */
+            if (q0 >= 8) q0 -= 16;
+            if (q1 >= 8) q1 -= 16;
+            x[i]   = (float)q0 * d;
+            x[i+1] = (float)q1 * d;
+        }
+    }
+}
+
+/* ── Q2_0: 2-bit symmetric ───────────────────────────────────────────── */
+
+void ct_quant_q2_0(const float *src, ct_q2_0_block_t *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const float *x = src + b * CT_QUANT_BLOCK_SIZE;
+        ct_q2_0_block_t *blk = dst + b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            float a = fabsf(x[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 1.0f; /* Q2 range: -1, 0, +1 */
+        blk->d = ct_quant_f32_to_fp16(d);
+
+        float id = d > 0 ? 1.0f / d : 0;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 4) {
+            int q0 = (int)(floorf(x[i] * id + 0.5f));
+            int q1 = (int)(floorf(x[i+1] * id + 0.5f));
+            int q2 = (int)(floorf(x[i+2] * id + 0.5f));
+            int q3 = (int)(floorf(x[i+3] * id + 0.5f));
+            if (q0 > 1) q0 = 1; if (q0 < -1) q0 = -1;
+            if (q1 > 1) q1 = 1; if (q1 < -1) q1 = -1;
+            if (q2 > 1) q2 = 1; if (q2 < -1) q2 = -1;
+            if (q3 > 1) q3 = 1; if (q3 < -1) q3 = -1;
+            blk->q[i/4] = (uint8_t)(((q0+1) & 0x3) | (((q1+1) & 0x3) << 2)
+                                   | (((q2+1) & 0x3) << 4) | (((q3+1) & 0x3) << 6));
+        }
+    }
+}
+
+void ct_quant_deq2_0(const ct_q2_0_block_t *src, float *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const ct_q2_0_block_t *blk = src + b;
+        float *x = dst + b * CT_QUANT_BLOCK_SIZE;
+        float d = ct_quant_fp16_to_f32(blk->d);
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 4) {
+            uint8_t p = blk->q[i/4];
+            int q0 = (int)((p >> 0) & 0x3) - 1;
+            int q1 = (int)((p >> 2) & 0x3) - 1;
+            int q2 = (int)((p >> 4) & 0x3) - 1;
+            int q3 = (int)((p >> 6) & 0x3) - 1;
+            x[i]   = (float)q0 * d;
+            x[i+1] = (float)q1 * d;
+            x[i+2] = (float)q2 * d;
+            x[i+3] = (float)q3 * d;
+        }
+    }
+}
+
+/* ── Q1_0: 1-bit (sign only) ─────────────────────────────────────────── */
+
+void ct_quant_q1_0(const float *src, ct_q1_0_block_t *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const float *x = src + b * CT_QUANT_BLOCK_SIZE;
+        ct_q1_0_block_t *blk = dst + b;
+
+        float amax = 0.0f;
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i++) {
+            float a = fabsf(x[i]);
+            if (a > amax) amax = a;
+        }
+        blk->d = ct_quant_f32_to_fp16(amax);
+
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 8) {
+            uint8_t byte = 0;
+            for (int j = 0; j < 8; j++) {
+                if (x[i + j] >= 0) byte |= (uint8_t)(1 << j);
+            }
+            blk->q[i/8] = byte;
+        }
+    }
+}
+
+void ct_quant_deq1_0(const ct_q1_0_block_t *src, float *dst, int64_t n) {
+    int64_t nb = n / CT_QUANT_BLOCK_SIZE;
+    for (int64_t b = 0; b < nb; b++) {
+        const ct_q1_0_block_t *blk = src + b;
+        float *x = dst + b * CT_QUANT_BLOCK_SIZE;
+        float d = ct_quant_fp16_to_f32(blk->d);
+        for (int i = 0; i < CT_QUANT_BLOCK_SIZE; i += 8) {
+            uint8_t byte = blk->q[i/8];
+            for (int j = 0; j < 8; j++) {
+                x[i + j] = (byte & (1 << j)) ? d : -d;
             }
         }
     }
-    return true;
 }
 
-bool ct_dequantize(const ct_quant_block_t *in, float *dst, uint64_t n) {
-    if (!in || !dst) return false;
-    if (in->block_size == 1 && in->quant_data) {
-        memcpy(dst, in->quant_data, n * sizeof(float));
-        return true;
+/* ── Generic dispatch ────────────────────────────────────────────────── */
+
+size_t ct_quant_do(const float *src, void *dst, int64_t n, ct_quant_type_t type) {
+    if (!src || !dst || n % CT_QUANT_BLOCK_SIZE != 0) return 0;
+    switch (type) {
+        case CT_QUANT_Q8_0:
+            ct_quant_q8_0(src, (ct_q8_0_block_t *)dst, n);
+            return (size_t)(n / CT_QUANT_BLOCK_SIZE) * sizeof(ct_q8_0_block_t);
+        case CT_QUANT_Q4_0:
+            ct_quant_q4_0(src, (ct_q4_0_block_t *)dst, n);
+            return (size_t)(n / CT_QUANT_BLOCK_SIZE) * sizeof(ct_q4_0_block_t);
+        case CT_QUANT_Q2_0:
+            ct_quant_q2_0(src, (ct_q2_0_block_t *)dst, n);
+            return (size_t)(n / CT_QUANT_BLOCK_SIZE) * sizeof(ct_q2_0_block_t);
+        case CT_QUANT_Q1_0:
+            ct_quant_q1_0(src, (ct_q1_0_block_t *)dst, n);
+            return (size_t)(n / CT_QUANT_BLOCK_SIZE) * sizeof(ct_q1_0_block_t);
+        default:
+            return 0;
     }
-    uint32_t bits = quant_bits_per_value(CT_QUANT_Q4_K);
-    /* Infer bits from size: F32 stored raw */
-    if (in->n_blocks == n && in->block_size == 1) {
-        memcpy(dst, in->quant_data, n * sizeof(float));
-        return true;
+}
+
+void ct_quant_undo(const void *src, float *dst, int64_t n, ct_quant_type_t type) {
+    if (!src || !dst || n % CT_QUANT_BLOCK_SIZE != 0) return;
+    switch (type) {
+        case CT_QUANT_Q8_0:
+            ct_quant_deq8_0((const ct_q8_0_block_t *)src, dst, n); break;
+        case CT_QUANT_Q4_0:
+            ct_quant_deq4_0((const ct_q4_0_block_t *)src, dst, n); break;
+        case CT_QUANT_Q2_0:
+            ct_quant_deq2_0((const ct_q2_0_block_t *)src, dst, n); break;
+        case CT_QUANT_Q1_0:
+            ct_quant_deq1_0((const ct_q1_0_block_t *)src, dst, n); break;
+        default: break;
     }
-    /* Reconstruct from min-max (assume Q4_K-style for stored blocks) */
-    for (uint64_t i = 0; i < n && i < in->n_values; i++) {
-        uint32_t b = (uint32_t)(i / in->block_size);
-        float mn = in->mins[b];
-        float sc = in->scales[b];
-        uint32_t qv = 0;
-        for (uint32_t bit = 0; bit < bits; bit++) {
-            uint64_t pos = i * bits + bit;
-            if (in->quant_data[pos / 8] & (uint8_t)(1u << (pos % 8)))
-                qv |= (1u << bit);
-        }
-        dst[i] = mn + sc * (float)qv;
-    }
-    return true;
-}
-
-void ct_quant_free(ct_quant_block_t *b) {
-    if (!b) return;
-    free(b->scales);
-    free(b->mins);
-    free(b->quant_data);
-    memset(b, 0, sizeof(*b));
-}
-
-uint64_t ct_quant_size_bytes(const ct_quant_block_t *b) {
-    if (!b) return 0;
-    if (b->block_size == 1) return b->n_values * sizeof(float);
-    uint32_t bits = quant_bits_per_value(CT_QUANT_Q4_K);
-    return (b->n_values * bits + 7) / 8 +
-           b->n_blocks * (sizeof(float) + sizeof(float));
-}
-
-uint64_t ct_quant_original_bytes(const ct_quant_block_t *b) {
-    return b ? b->n_values * sizeof(float) : 0;
-}
-
-double ct_quant_ratio(const ct_quant_block_t *b) {
-    if (!b || b->n_values == 0) return 0.0;
-    return (double)ct_quant_size_bytes(b) / (double)ct_quant_original_bytes(b);
-}
-
-uint64_t ct_quant_model_size(const ct_quant_model_t *m, const ct_quant_config_t *cfg) {
-    if (!m || !cfg) return 0;
-    double expert_ratio;
-    switch (cfg->expert_quant) {
-        case CT_QUANT_Q2_K:    expert_ratio = 2.0 / 32.0; break;
-        case CT_QUANT_Q4_K:    expert_ratio = 4.0 / 32.0; break;
-        case CT_QUANT_Q5_K:    expert_ratio = 5.0 / 32.0; break;
-        case CT_QUANT_Q6_K:    expert_ratio = 6.0 / 32.0; break;
-        case CT_QUANT_IQ2_XXS: expert_ratio = 2.0 / 32.0; break;
-        case CT_QUANT_MXFP4:    expert_ratio = 4.0 / 32.0; break;
-        default:                 expert_ratio = 1.0;
-    }
-    double dense_ratio;
-    switch (cfg->dense_quant) {
-        case CT_QUANT_Q4_K: dense_ratio = 4.0 / 32.0; break;
-        case CT_QUANT_Q5_K: dense_ratio = 5.0 / 32.0; break;
-        case CT_QUANT_Q6_K: dense_ratio = 6.0 / 32.0; break;
-        default:            dense_ratio = 1.0;
-    }
-    uint64_t expert_bytes = (uint64_t)(m->bytes_per_expert_f32 * m->n_experts * expert_ratio);
-    uint64_t dense_bytes  = (uint64_t)(m->bytes_per_expert_f32 * m->n_shared * dense_ratio);
-    return expert_bytes + dense_bytes;
-}
-
-ct_quant_quality_t ct_quant_estimate_quality(ct_quant_t q) {
-    ct_quant_quality_t r = {0};
-    switch (q) {
-        case CT_QUANT_Q2_K:    r.activation_ratio = 0.90; r.quality_score = 0.85; break;
-        case CT_QUANT_IQ2_XXS: r.activation_ratio = 0.88; r.quality_score = 0.82; break;
-        case CT_QUANT_Q4_K:    r.activation_ratio = 0.97; r.quality_score = 0.95; break;
-        case CT_QUANT_Q5_K:    r.activation_ratio = 0.98; r.quality_score = 0.97; break;
-        case CT_QUANT_Q6_K:    r.activation_ratio = 0.99; r.quality_score = 0.98; break;
-        case CT_QUANT_MXFP4:    r.activation_ratio = 0.96; r.quality_score = 0.94; break;
-        default:                 r.activation_ratio = 1.0;  r.quality_score = 1.0;  break;
-    }
-    return r;
 }

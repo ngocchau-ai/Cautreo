@@ -17,28 +17,37 @@ static void write_synthetic_gguf(const char *path) {
     uint32_t magic = GGUF_MAGIC;
     uint32_t version = 3;
     uint64_t n_tensors = 1;
-    uint64_t n_kv = 3;
+    uint64_t n_kv = 4;
     fwrite(&magic, 4, 1, f);
     fwrite(&version, 4, 1, f);
     fwrite(&n_tensors, 8, 1, f);
     fwrite(&n_kv, 8, 1, f);
 
+    uint64_t klen;
+    uint32_t t;
+
+    /* KV: general.alignment = 1 (no padding — matches our raw write) */
+    klen = strlen("general.alignment");
+    fwrite(&klen, 8, 1, f); fwrite("general.alignment", 1, klen, f);
+    t = GGUF_VALUE_UINT32; fwrite(&t, 4, 1, f);
+    uint32_t align = 1; fwrite(&align, 4, 1, f);
+
     /* KV: block_count = 32 */
-    uint64_t klen = strlen("llama.block_count");
+    klen = strlen("llama.block_count");
     fwrite(&klen, 8, 1, f); fwrite("llama.block_count", 1, klen, f);
-    uint8_t t = GGUF_VALUE_UINT32; fwrite(&t, 1, 1, f);
+    t = GGUF_VALUE_UINT32; fwrite(&t, 4, 1, f);
     uint32_t bc = 32; fwrite(&bc, 4, 1, f);
 
     /* KV: embedding_length = 4096 */
     klen = strlen("llama.embedding_length");
     fwrite(&klen, 8, 1, f); fwrite("llama.embedding_length", 1, klen, f);
-    t = GGUF_VALUE_UINT32; fwrite(&t, 1, 1, f);
+    t = GGUF_VALUE_UINT32; fwrite(&t, 4, 1, f);
     uint32_t el = 4096; fwrite(&el, 4, 1, f);
 
     /* KV: context_length = 8192 */
     klen = strlen("llama.context_length");
     fwrite(&klen, 8, 1, f); fwrite("llama.context_length", 1, klen, f);
-    t = GGUF_VALUE_UINT32; fwrite(&t, 1, 1, f);
+    t = GGUF_VALUE_UINT32; fwrite(&t, 4, 1, f);
     uint32_t cl = 8192; fwrite(&cl, 4, 1, f);
 
     /* Tensor: "blk.0.attn_q.weight", dims [4096,4096], F32, offset 0 */
