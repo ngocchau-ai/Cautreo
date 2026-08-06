@@ -14,8 +14,8 @@
 
 CC      ?= gcc
 AR      ?= ar
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -I src -I src/core -mavx2 -mfma -msse3
-LIBS    ?= -lm
+CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -I src -I src/core -mavx2 -mfma -msse3 -fopenmp
+LIBS    ?= -lm -fopenmp
 
 # Windows: link Winsock2 cho server
 ifeq ($(OS),Windows_NT)
@@ -42,8 +42,8 @@ ENGINE_SRCS  := $(wildcard src/engine/*.c src/streaming/*.c src/distributed/*.c 
                            src/arch/*.c src/attention/*.c src/backend/*.c \
                            src/kv_cache/*.c) \
                            src/cautreo.c
-SERVER_SRCS  := $(wildcard src/server/*.c)
-AGENT_SRCS   := $(wildcard src/agent/*.c)
+SERVER_SRCS  := $(filter-out src/server/server_main.c,$(wildcard src/server/*.c))
+AGENT_SRCS   := $(filter-out src/agent/agent_main.c,$(wildcard src/agent/*.c))
 
 CORE_OBJS    := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 ENGINE_OBJS  := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(ENGINE_SRCS))

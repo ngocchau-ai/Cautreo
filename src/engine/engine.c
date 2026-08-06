@@ -9,11 +9,18 @@
 
 #include "engine/engine.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "arch/arch.h"
 #include "model/model.h"
 #include "transformer/transformer.h"
 #include "transformer/ds4_forward.h"
 #include "gguf/gguf.h"
+#include "wvs/wvs.h"
+#include "awm/awm.h"
+#include "hal/hal.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -49,6 +56,11 @@ struct ct_engine {
     /* SSD streaming counters */
     uint64_t           stream_hits;
     uint64_t           stream_misses;
+
+    /* WVS + AWM for adaptive weight caching (owned by engine) */
+    void               *wvs;
+    void               *awm;
+    char                wvs_path[1024]; /* persist path for WVS heat map */
 };
 
 static const char *BACKEND_NAMES[CT_BACKEND_COUNT] = {
@@ -88,6 +100,9 @@ ct_engine_t *ct_engine_create(const ct_engine_options_t *opts) {
         e->opts.ctx_size = 4096;
         e->opts.n_threads = 4;
     }
+#ifdef _OPENMP
+    omp_set_num_threads(e->opts.n_threads > 0 ? e->opts.n_threads : 4);
+#endif
     /* Default KV config */
     e->kv.n_layers = 32;
     e->kv.n_heads  = 32;
@@ -108,6 +123,9 @@ ct_engine_t *ct_engine_create(const ct_engine_options_t *opts) {
     /* Ensure built-in architecture backends are registered. */
     ct_arch_register_builtins();
 
+    e->wvs = NULL;
+    e->awm = NULL;
+
     return e;
 }
 
@@ -119,6 +137,16 @@ void ct_engine_destroy(ct_engine_t *e) {
     if (e->tf) ct_transformer_free(e->tf);
     if (e->model) ct_model_free(e->model);
     if (e->split) gguf_split_close(e->split);
+    /* Persist WVS heat map before destroying */
+    if (e->wvs && e->wvs_path[0]) {
+        int ret = ct_wvs_save((ct_wvs_t *)e->wvs, e->wvs_path);
+        if (ret == 0)
+            fprintf(stderr, "[engine] WVS heat map saved to %s\n", e->wvs_path);
+        else
+            fprintf(stderr, "[engine] WVS save to %s failed (%d)\n", e->wvs_path, ret);
+    }
+    if (e->wvs) ct_wvs_destroy((ct_wvs_t *)e->wvs);
+    if (e->awm) ct_awm_destroy((ct_awm_t *)e->awm);
     free(e->kv_tokens);
     free(e);
 }
@@ -152,6 +180,50 @@ bool ct_engine_load(ct_engine_t *e) {
                 if (e->arch_ctx) {
                     fprintf(stderr, "[engine] %s backend created — real inference enabled\n",
                             e->arch_ops->name);
+
+                    /* Create WVS + AWM for adaptive expert caching */
+                    e->wvs = ct_wvs_create(16384, CT_WVS_GRAN_EXPERT);
+                    uint64_t ram_budget = 6ULL * 1024 * 1024 * 1024; /* 6 GB default */
+                    const ct_hardware_scorecard_t *sc = ct_hal_detect();
+                    if (sc && sc->ram_avail_bytes > 0) {
+                        ram_budget = sc->ram_avail_bytes;
+                    }
+                    e->awm = ct_awm_create(512, ram_budget);
+
+                    /* Try to load persisted WVS heat map */
+                    e->wvs_path[0] = '\0';
+                    if (e->opts.model_parts && e->opts.n_model_parts > 0) {
+                        snprintf(e->wvs_path, sizeof(e->wvs_path),
+                                 "%s.wvs", e->opts.model_parts[0]);
+                    } else if (e->opts.model_path) {
+                        snprintf(e->wvs_path, sizeof(e->wvs_path),
+                                 "%s.wvs", e->opts.model_path);
+                    }
+                    if (e->wvs_path[0]) {
+                        ct_wvs_t *loaded = ct_wvs_load(e->wvs_path, 16384);
+                        if (loaded) {
+                            ct_wvs_destroy((ct_wvs_t *)e->wvs);
+                            e->wvs = loaded;
+                            fprintf(stderr, "[engine] WVS heat map loaded from %s\n",
+                                    e->wvs_path);
+                        } else {
+                            fprintf(stderr, "[engine] No existing WVS heat map at %s "
+                                    "(cold start)\n", e->wvs_path);
+                        }
+                    }
+
+                    /* Load .bit1 1-bit compressed weights BEFORE WVS cache
+                     * so the cache stride adapts to Q1_0 size (~4.5 MB vs 12.75 MB) */
+                    if (e->opts.bit1_path && e->arch_ops->set_bit1_path) {
+                        e->arch_ops->set_bit1_path(e->arch_ctx, e->opts.bit1_path);
+                    }
+
+                    if (e->arch_ops->set_wvs) {
+                        e->arch_ops->set_wvs(e->arch_ctx, e->wvs, e->awm, ram_budget);
+                        fprintf(stderr, "[engine] WVS + AWM attached for adaptive expert caching"
+                                " (budget %.0f MB)\n",
+                                (double)ram_budget / 1048576.0);
+                    }
                 } else {
                     fprintf(stderr, "[engine] %s backend create returned NULL — "
                                     "will use fallback\n", e->arch_ops->name);

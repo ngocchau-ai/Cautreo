@@ -23,6 +23,8 @@
 
 #include "transformer/ds4_forward.h"
 #include "gguf/gguf.h"
+#include "wvs/wvs.h"
+#include "awm/awm.h"
 
 #include <immintrin.h>
 #include <math.h>
@@ -31,6 +33,16 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
+
+/* Windows threading for SSD prefetch */
+#ifndef _WIN32
+#error "ds4_forward requires Windows (CreateThread/CriticalSection/ConditionVariable)"
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include "quant/quant.h"
 
 /* =========================================================================
  * Type dequantization
@@ -51,9 +63,21 @@ static const float E2M1_TABLE[16] = {
 };
 
 #define MXFP4_BLOCK 32
+
+/* Precomputed E8M0 scale table: scale = 2^(e8m0 - 127) for 0..255.
+ * Computed once at startup (ldexpf is slow, table lookup is fast). */
+static float E8M0_SCALE[256];
+static void e8m0_init_table(void) {
+    static bool done = false;
+    if (done) return;
+    for (int i = 0; i < 256; i++)
+        E8M0_SCALE[i] = (i == 0) ? 0.0f : ldexpf(1.0f, i - 127);
+    done = true;
+}
+
 /* Block layout: 1 byte scale (e8m0) + 16 bytes packed nibbles (32 × 4-bit) */
 static void dequant_mxfp4_block(const uint8_t *src, float *dst) {
-    float scale = (src[0] == 0) ? 0.0f : ldexpf(1.0f, (int)src[0] - 127);
+    float scale = E8M0_SCALE[src[0]];
     const uint8_t *data = src + 1;
     for (int i = 0; i < MXFP4_BLOCK; i++) {
         uint8_t nibble = (i & 1) ? (data[i >> 1] >> 4) : (data[i >> 1] & 0x0F);
@@ -180,10 +204,33 @@ static void rmsnorm_ip(float *x, const float *w, uint32_t n, float eps) {
 static void matvec(const float *A, const float *x, float *y, uint32_t n_out, uint32_t n_in) {
 #pragma omp parallel for schedule(static) if(n_out > 256)
     for (int32_t i = 0; i < (int32_t)n_out; i++) {
-        double acc = 0.0;
         const float *row = A + (size_t)i * n_in;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        uint32_t j;
+        for (j = 0; j + 16 <= n_in; j += 16) {
+            __m256 x0 = _mm256_loadu_ps(x + j);
+            __m256 x1 = _mm256_loadu_ps(x + j + 8);
+            __m256 w0 = _mm256_loadu_ps(row + j);
+            __m256 w1 = _mm256_loadu_ps(row + j + 8);
+            acc0 = _mm256_fmadd_ps(w0, x0, acc0);
+            acc1 = _mm256_fmadd_ps(w1, x1, acc1);
+        }
+        __m256 sum = _mm256_add_ps(acc0, acc1);
+        __m128 hi = _mm256_extractf128_ps(sum, 1);
+        __m128 lo = _mm256_castps256_ps128(sum);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        float s = _mm_cvtss_f32(sum128);
+        for (; j < n_in; j++) s += row[j] * x[j];
+        y[i] = s;
+#else
+        double acc = 0.0;
         for (uint32_t j = 0; j < n_in; j++) acc += (double)row[j] * x[j];
         y[i] = (float)acc;
+#endif
     }
 }
 
@@ -203,6 +250,36 @@ static float silu_f(float x) { return x / (1.0f + expf(-x)); }
 #define N_VOCAB   129280u
 #define ROPE_BASE 10000.0f
 #define EPS       1e-6f
+
+/* ── .bit1 file reader (1-bit compressed expert weights) ──────────────── */
+#define BIT1_MAGIC    "CT1B"
+#define BIT1_VERSION  1
+
+#pragma pack(push, 1)
+typedef struct {
+    char     magic[4];       /* "CT1B" */
+    uint32_t version;        /* 1 */
+    uint32_t n_layers;       /* 43 */
+    uint32_t n_experts;      /* 256 */
+    uint32_t n_embd;         /* 4096 */
+    uint32_t n_ff;           /* 2048 */
+    uint32_t block_size;     /* 32 */
+    uint8_t  reserved[36];
+} bit1_header_t;
+
+typedef struct {
+    uint64_t offset;         /* byte offset from start of data section */
+    uint64_t size;           /* bytes of Q1_0 data */
+} bit1_index_entry_t;
+#pragma pack(pop)
+
+typedef struct {
+    FILE              *fp;       /* .bit1 file handle (NULL = not loaded) */
+    bit1_header_t      hdr;      /* file header */
+    bit1_index_entry_t *index;   /* [n_layers × n_experts × 3] */
+    size_t             n_entries;/* n_layers * n_experts * 3 */
+    CRITICAL_SECTION   io_lock;  /* guards fseeko/fread (shared with prefetch thread) */
+} bit1_reader_t;
 
 struct ds4_ctx {
     const gguf_split_t *split;
@@ -257,16 +334,48 @@ struct ds4_ctx {
     float **layer_shexp_u;   /* 43 × [N_FF * N_EMBD] */
     float **layer_shexp_d;   /* 43 × [N_EMBD * N_FF] */
     bool    fast_path_ready;
+
+    /* ── WVS-guided expert cache (adaptive, learns over time) ── */
+    struct ct_wvs_s *wvs;    /* heat tracker (NULL = legacy Fast-Path) */
+    struct ct_awm_s *awm;    /* RAM budget manager (may be NULL) */
+    uint32_t token_count;    /* for periodic WVS decay */
+
+    /* Raw MXFP4 bytes for cached routed experts.
+     * Each slot = one expert: gate + up + down raw bytes.
+     * Managed by WVS heat: hot experts cached, cold evicted. */
+    uint8_t  *exp_cache;     /* flat byte array [cap × stride] */
+    uint32_t  exp_cache_cap; /* number of expert slots */
+    uint32_t  exp_cache_stride; /* bytes per expert (gate+up+down) */
+    int32_t  *exp_cache_map; /* [n_layers × N_EXP] → slot, -1 = not cached */
+    uint16_t *exp_cache_heat;/* [cap] LRU heat for eviction */
+    uint32_t  exp_cache_used;
+
+    /* ── SSD prefetch (overlap I/O with compute) ── */
+    HANDLE   pf_thread;       /* background reader thread (NULL = disabled) */
+    CRITICAL_SECTION pf_lock; /* guards pf_state/pf_ready/pf_buf */
+    CONDITION_VARIABLE pf_cv; /* signals new prefetch job / completion */
+    volatile int  pf_state;   /* -1 = idle, >=0 = expert idx being prefetched */
+    volatile bool pf_ready;   /* true when pf_buf holds a complete expert */
+    volatile bool pf_exit;    /* true to stop the thread */
+    uint8_t *pf_buf;          /* [stride] raw MXFP4 bytes for one expert */
+    uint64_t pf_completions;  /* diagnostics: successful prefetch reads */
+    uint64_t pf_failures;     /* diagnostics: failed prefetch reads */
+
+    /* ── .bit1 1-bit compressed weights (optional, replaces GGUF expert reads) ── */
+    bit1_reader_t *bit1;      /* NULL = use GGUF split for expert weights */
 };
 
 ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
     if (!split) return NULL;
     ds4_ctx_t *c = (ds4_ctx_t *)calloc(1, sizeof(ds4_ctx_t));
     if (!c) return NULL;
-    c->split    = split;
+    c->split = split;
     c->ctx_size = ctx_size ? ctx_size : 512;
     c->n_layers = 43;
-    c->kv_len   = 0;
+    c->kv_len = 0;
+
+    /* One-time init for dequant lookup tables */
+    e8m0_init_table();
 
     /* KV cache: n_layers × ctx × KV_DIM floats */
     size_t kv_total = (size_t)c->n_layers * c->ctx_size * KV_DIM;
@@ -409,6 +518,31 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
         }
     }
 
+    /* Expert cache will be allocated lazily in ds4_set_wvs() */
+    c->wvs = NULL;
+    c->awm = NULL;
+    c->token_count = 0;
+    c->exp_cache = NULL;
+    c->exp_cache_cap = 0;
+    c->exp_cache_stride = 0;
+    c->exp_cache_map = NULL;
+    c->exp_cache_heat = NULL;
+    c->exp_cache_used = 0;
+
+    /* .bit1 reader disabled by default */
+    c->bit1 = NULL;
+
+    /* Prefetch: thread starts disabled, created on first use */
+    c->pf_thread = NULL;
+    InitializeCriticalSection(&c->pf_lock);
+    InitializeConditionVariable(&c->pf_cv);
+    c->pf_state = -1;
+    c->pf_ready = false;
+    c->pf_exit = false;
+    c->pf_buf = NULL;
+    c->pf_completions = 0;
+    c->pf_failures = 0;
+
     return c;
 }
 
@@ -435,6 +569,34 @@ void ds4_free(ds4_ctx_t *c) {
     free(c->lm_head_bf16);
     free(c->token_embd_bf16);
     free(c->output_norm_f32);
+
+    /* Free WVS expert cache */
+    free(c->exp_cache);
+    free(c->exp_cache_map);
+    free(c->exp_cache_heat);
+
+    /* Stop prefetch thread */
+    if (c->pf_thread) {
+        fprintf(stderr, "[ds4] prefetch: %llu completions, %llu failures\n",
+                (unsigned long long)c->pf_completions,
+                (unsigned long long)c->pf_failures);
+        c->pf_exit = true;
+        WakeAllConditionVariable(&c->pf_cv);
+        WaitForSingleObject(c->pf_thread, 5000);
+        CloseHandle(c->pf_thread);
+    }
+    DeleteCriticalSection(&c->pf_lock);
+    free(c->pf_buf);
+
+    /* Free .bit1 reader */
+    if (c->bit1) {
+        if (c->bit1->fp) fclose(c->bit1->fp);
+        DeleteCriticalSection(&c->bit1->io_lock);
+        free(c->bit1->index);
+        free(c->bit1);
+        c->bit1 = NULL;
+    }
+
     free(c);
 }
 
@@ -446,11 +608,419 @@ void ds4_reset(ds4_ctx_t *c) {
 }
 
 /* =========================================================================
+ * WVS-guided expert cache
+ * ========================================================================= */
+
+/* Raw MXFP4 byte sizes for one routed expert (gate + up + down).
+ * Each MXFP4 block = 1 byte scale + 16 bytes nibbles for 32 elements.
+ * gate/up: [N_FF=2048, N_EMBD=4096] → 4096 rows × 64 blocks × 17 = 4,456,448
+ * down:   [N_EMBD=4096, N_FF=2048] → 2048 rows × 128 blocks × 17 = 4,456,448 */
+#define DS4_EXP_GATE_ROW_BLOCKS  ((N_FF + 31) / 32)    /* 64 */
+#define DS4_EXP_GATE_ROW_BYTES   (DS4_EXP_GATE_ROW_BLOCKS * 17)  /* 1088 */
+#define DS4_EXP_GATE_BYTES       ((size_t)N_EMBD * DS4_EXP_GATE_ROW_BYTES) /* 4,456,448 */
+#define DS4_EXP_UP_BYTES         DS4_EXP_GATE_BYTES
+#define DS4_EXP_DOWN_ROW_BLOCKS  ((N_EMBD + 31) / 32)   /* 128 */
+#define DS4_EXP_DOWN_ROW_BYTES   (DS4_EXP_DOWN_ROW_BLOCKS * 17) /* 2176 */
+#define DS4_EXP_DOWN_BYTES       ((size_t)N_FF * DS4_EXP_DOWN_ROW_BYTES) /* 4,456,448 */
+#define DS4_EXP_CACHE_STRIDE     (DS4_EXP_GATE_BYTES + DS4_EXP_UP_BYTES + DS4_EXP_DOWN_BYTES) /* ~12.75 MB */
+#define DS4_EXP_CACHE_SLOTS      256  /* 256 × 12.75 MB ≈ 3.3 GB RAM */
+#define DS4_EXP_WVS_DECAY_INTERVAL 50 /* decay WVS every 50 tokens */
+
+/* Q1_0 (1-bit) byte sizes for one routed expert.
+ * Each Q1_0 block = 2 bytes scale + 4 bytes bits = 6 bytes per 32 elements.
+ * gate/up/down each: [N_FF * N_EMBD] elements → N_FF*N_EMBD/32 blocks × 6 bytes. */
+#define DS4_EXP_Q1_ELEMS        ((size_t)N_FF * N_EMBD)  /* 8,388,608 */
+#define DS4_EXP_Q1_BLOCKS       (DS4_EXP_Q1_ELEMS / CT_QUANT_BLOCK_SIZE) /* 262,144 */
+#define DS4_EXP_Q1_MATRIX_BYTES (DS4_EXP_Q1_BLOCKS * sizeof(ct_q1_0_block_t)) /* 1,572,864 */
+#define DS4_EXP_Q1_STRIDE       (DS4_EXP_Q1_MATRIX_BYTES * 3) /* 4,718,592 */
+
+/* Current expert byte stride (depends on .bit1 mode). */
+static inline uint32_t exp_stride(const ds4_ctx_t *c) {
+    return c->bit1 ? (uint32_t)DS4_EXP_Q1_STRIDE : (uint32_t)DS4_EXP_CACHE_STRIDE;
+}
+
+/* Read one expert's weights into buf.
+ * - If .bit1 is active: reads Q1_0 blocks from .bit1 file.
+ * - Otherwise: reads raw MXFP4 bytes from split GGUF.
+ * Fills buf with: [gate | up | down] (either Q1_0 or MXFP4 format).
+ * Returns true on success. */
+static bool read_expert_raw(ds4_ctx_t *c, uint32_t layer,
+                             uint32_t exp_id, uint8_t *buf) {
+    /* ── .bit1 path: read Q1_0 blocks ── */
+    if (c->bit1) {
+        bit1_reader_t *b = c->bit1;
+        size_t base = ((size_t)layer * b->hdr.n_experts + exp_id) * 3;
+        EnterCriticalSection(&b->io_lock);
+        for (int m = 0; m < 3; m++) {
+            const bit1_index_entry_t *ent = &b->index[base + m];
+            if (_fseeki64(b->fp, (__int64)ent->offset, SEEK_SET) != 0) {
+                LeaveCriticalSection(&b->io_lock);
+                return false;
+            }
+            if (fread(buf + (size_t)m * DS4_EXP_Q1_MATRIX_BYTES,
+                      1, ent->size, b->fp) != ent->size) {
+                LeaveCriticalSection(&b->io_lock);
+                return false;
+            }
+        }
+        LeaveCriticalSection(&b->io_lock);
+        return true;
+    }
+
+    /* ── GGUF split path: read raw MXFP4 bytes ── */
+    const gguf_split_t *s = c->split;
+    char name[192];
+
+    /* Gate: ffn_gate_exps.weight [N_FF, N_EMBD, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", layer);
+    const gguf_tensor_info_t *ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    /* Each expert = N_EMBD consecutive rows starting at exp_id * N_EMBD */
+    uint64_t gate_off = (uint64_t)exp_id * N_EMBD * DS4_EXP_GATE_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf, DS4_EXP_GATE_BYTES, gate_off))
+        return false;
+
+    /* Up: ffn_up_exps.weight [N_FF, N_EMBD, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", layer);
+    ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    uint64_t up_off = (uint64_t)exp_id * N_EMBD * DS4_EXP_GATE_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf + DS4_EXP_GATE_BYTES,
+                                    DS4_EXP_UP_BYTES, up_off))
+        return false;
+
+    /* Down: ffn_down_exps.weight [N_EMBD, N_FF, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", layer);
+    ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    uint64_t down_off = (uint64_t)exp_id * N_FF * DS4_EXP_DOWN_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf + DS4_EXP_GATE_BYTES + DS4_EXP_UP_BYTES,
+                                    DS4_EXP_DOWN_BYTES, down_off))
+        return false;
+
+    return true;
+}
+
+/* Dequant cached expert bytes into FP32 matrices.
+ * If .bit1 is active, the cache holds Q1_0 blocks (dequant via ct_quant_deq1_0).
+ * Otherwise, the cache holds MXFP4 raw bytes (dequant via dequant_mxfp4_block).
+ * gate_out: [N_FF × N_EMBD], up_out: [N_FF × N_EMBD], down_out: [N_EMBD × N_FF] */
+static void dequant_expert_cache(ds4_ctx_t *c, const uint8_t *raw,
+                                  float *gate_out, float *up_out, float *down_out) {
+    /* ── Q1_0 dequant path ── */
+    if (c->bit1) {
+        const ct_q1_0_block_t *q1_gate = (const ct_q1_0_block_t *)raw;
+        const ct_q1_0_block_t *q1_up   = (const ct_q1_0_block_t *)(raw + DS4_EXP_Q1_MATRIX_BYTES);
+        const ct_q1_0_block_t *q1_down = (const ct_q1_0_block_t *)(raw + DS4_EXP_Q1_MATRIX_BYTES * 2);
+        ct_quant_deq1_0(q1_gate, gate_out, (int64_t)DS4_EXP_Q1_ELEMS);
+        ct_quant_deq1_0(q1_up,   up_out,   (int64_t)DS4_EXP_Q1_ELEMS);
+        ct_quant_deq1_0(q1_down, down_out, (int64_t)DS4_EXP_Q1_ELEMS);
+        return;
+    }
+
+    /* ── MXFP4 dequant path ── */
+    const uint8_t *gate_raw = raw;
+    const uint8_t *up_raw   = raw + DS4_EXP_GATE_BYTES;
+    const uint8_t *down_raw = raw + DS4_EXP_GATE_BYTES + DS4_EXP_UP_BYTES;
+
+    /* Dequant gate: N_EMBD rows × N_FF cols = 64 blocks per row */
+    for (uint32_t r = 0; r < N_EMBD; r++) {
+        float *row_out = gate_out + (size_t)r * N_FF;
+        for (uint32_t b = 0; b < DS4_EXP_GATE_ROW_BLOCKS; b++) {
+            dequant_mxfp4_block(gate_raw + r * DS4_EXP_GATE_ROW_BYTES + b * 17,
+                                row_out + b * MXFP4_BLOCK);
+        }
+    }
+    /* Dequant up: N_EMBD rows × N_FF cols = 64 blocks per row */
+    for (uint32_t r = 0; r < N_EMBD; r++) {
+        float *row_out = up_out + (size_t)r * N_FF;
+        for (uint32_t b = 0; b < DS4_EXP_GATE_ROW_BLOCKS; b++) {
+            dequant_mxfp4_block(up_raw + r * DS4_EXP_GATE_ROW_BYTES + b * 17,
+                                row_out + b * MXFP4_BLOCK);
+        }
+    }
+    /* Dequant down: N_FF rows × N_EMBD cols = 128 blocks per row */
+    for (uint32_t r = 0; r < N_FF; r++) {
+        float *row_out = down_out + (size_t)r * N_EMBD;
+        for (uint32_t b = 0; b < DS4_EXP_DOWN_ROW_BLOCKS; b++) {
+            dequant_mxfp4_block(down_raw + r * DS4_EXP_DOWN_ROW_BYTES + b * 17,
+                                row_out + b * MXFP4_BLOCK);
+        }
+    }
+}
+
+/* Evict the coldest cached expert to make room. */
+static int exp_cache_evict_coldest(ds4_ctx_t *c) {
+    if (c->exp_cache_used == 0) return -1;
+    uint32_t coldest = 0;
+    uint16_t min_heat = c->exp_cache_heat[0];
+    for (uint32_t i = 1; i < c->exp_cache_cap; i++) {
+        if (c->exp_cache_heat[i] < min_heat) {
+            min_heat = c->exp_cache_heat[i];
+            coldest = i;
+        }
+    }
+    /* Clear map entry for this slot */
+    for (uint32_t l = 0; l < c->n_layers; l++) {
+        for (uint32_t e = 0; e < N_EXP; e++) {
+            if (c->exp_cache_map[l * N_EXP + e] == (int32_t)coldest) {
+                c->exp_cache_map[l * N_EXP + e] = -1;
+                goto found;
+            }
+        }
+    }
+found:
+    c->exp_cache_heat[coldest] = 0;
+    c->exp_cache_used--;
+    return (int)coldest;
+}
+
+/* Ensure an expert's raw MXFP4 bytes are in cache.
+ * If `preloaded_buf` is non-NULL, copy from there instead of reading SSD.
+ * Returns true if the expert is now in cache. */
+static bool exp_cache_ensure(ds4_ctx_t *c, uint32_t layer, uint32_t exp_id,
+                              const uint8_t *preloaded_buf) {
+    int32_t slot = c->exp_cache_map[layer * N_EXP + exp_id];
+    if (slot >= 0) {
+        /* Already cached — bump heat */
+        c->exp_cache_heat[slot]++;
+        return true;
+    }
+
+    /* Not cached — find a slot */
+    int free_slot = -1;
+    for (uint32_t i = 0; i < c->exp_cache_cap; i++) {
+        if (c->exp_cache_heat[i] == 0 && c->exp_cache_map[layer * N_EXP + exp_id] < 0) {
+            /* Check if this slot is truly unused */
+            bool used = false;
+            for (uint32_t l = 0; l < c->n_layers && !used; l++)
+                for (uint32_t e = 0; e < N_EXP && !used; e++)
+                    if (c->exp_cache_map[l * N_EXP + e] == (int32_t)i) used = true;
+            if (!used) { free_slot = (int)i; break; }
+        }
+    }
+
+    if (free_slot < 0) {
+        if (c->exp_cache_used >= c->exp_cache_cap) {
+            free_slot = exp_cache_evict_coldest(c);
+        } else {
+            free_slot = (int)c->exp_cache_used;
+        }
+    }
+    if (free_slot < 0) return false;
+
+    /* Fill slot: from preloaded buffer (prefetch) or SSD */
+    uint8_t *slot_ptr = c->exp_cache + (size_t)free_slot * c->exp_cache_stride;
+    if (preloaded_buf) {
+        memcpy(slot_ptr, preloaded_buf, c->exp_cache_stride);
+    } else {
+        if (!read_expert_raw(c, layer, exp_id, slot_ptr))
+            return false;
+    }
+
+    c->exp_cache_map[layer * N_EXP + exp_id] = free_slot;
+    c->exp_cache_heat[free_slot] = 1;
+    c->exp_cache_used++;
+    return true;
+}
+
+/* ── Prefetch thread: reads one expert from SSD in background ── */
+static DWORD WINAPI pf_thread_fn(LPVOID arg) {
+    ds4_ctx_t *c = (ds4_ctx_t *)arg;
+    while (1) {
+        EnterCriticalSection(&c->pf_lock);
+        while (c->pf_state < 0 && !c->pf_exit)
+            SleepConditionVariableCS(&c->pf_cv, &c->pf_lock, INFINITE);
+        if (c->pf_exit) { LeaveCriticalSection(&c->pf_lock); break; }
+        int layer  = c->pf_state >> 16;
+        int expert = c->pf_state & 0xFFFF;
+        LeaveCriticalSection(&c->pf_lock);
+
+        /* Read expert raw bytes from SSD into prefetch buffer */
+        bool ok = read_expert_raw(c, (uint32_t)layer, (uint32_t)expert, c->pf_buf);
+        if (ok) c->pf_completions++; else c->pf_failures++;
+
+        EnterCriticalSection(&c->pf_lock);
+        c->pf_ready = ok;
+        c->pf_state = -1;
+        WakeAllConditionVariable(&c->pf_cv);
+        LeaveCriticalSection(&c->pf_lock);
+    }
+    return 0;
+}
+
+/* Start prefetching one expert in background. Thread-safe. */
+static void pf_start(ds4_ctx_t *c, uint32_t layer, uint32_t expert) {
+    EnterCriticalSection(&c->pf_lock);
+    c->pf_state = ((int)layer << 16) | (int)expert;
+    c->pf_ready = false;
+    WakeAllConditionVariable(&c->pf_cv);
+    LeaveCriticalSection(&c->pf_lock);
+}
+
+/* Wait for the current prefetch to complete. Returns the prefetch buffer.
+ * The caller MUST copy or use the buffer before the next pf_start call. */
+static const uint8_t *pf_wait(ds4_ctx_t *c) {
+    EnterCriticalSection(&c->pf_lock);
+    while (!c->pf_ready && c->pf_state >= 0)
+        SleepConditionVariableCS(&c->pf_cv, &c->pf_lock, INFINITE);
+    bool ok = c->pf_ready;
+    LeaveCriticalSection(&c->pf_lock);
+    return ok ? c->pf_buf : NULL;
+}
+
+/* Ensure prefetch thread is running. Call once before first use. */
+static void pf_ensure_thread(ds4_ctx_t *c) {
+    if (c->pf_thread) return;
+    c->pf_buf = (uint8_t *)malloc(c->exp_cache_stride);
+    if (!c->pf_buf) {
+        fprintf(stderr, "[ds4] WARN: prefetch buffer alloc failed, prefetch disabled\n");
+        return;
+    }
+    c->pf_exit = false;
+    c->pf_thread = CreateThread(NULL, 0, pf_thread_fn, c, 0, NULL);
+    if (!c->pf_thread) {
+        fprintf(stderr, "[ds4] WARN: prefetch thread creation failed, prefetch disabled\n");
+        free(c->pf_buf); c->pf_buf = NULL;
+    }
+}
+
+/* =========================================================================
+ * Dynamic cache sizing + WVS attach
+ * ========================================================================= */
+
+void ds4_set_wvs(ds4_ctx_t *c, struct ct_wvs_s *wvs, struct ct_awm_s *awm,
+                  uint64_t ram_budget) {
+    if (!c) return;
+    c->wvs = wvs;
+    c->awm = awm;
+
+    if (wvs) {
+        /* Allocate expert cache lazily on first set_wvs call */
+        if (!c->exp_cache) {
+            /* Dynamic sizing: use ram_budget for expert cache.
+             * Reserve ~512 MB for overhead (KV cache, scratch, etc.).
+             * Cap at 512 slots to avoid excessive allocation. */
+            uint64_t avail = (ram_budget > 536870912ULL)
+                             ? ram_budget - 536870912ULL
+                             : ram_budget;
+            uint32_t slots = (uint32_t)(avail / exp_stride(c));
+            if (slots < 16)  slots = 16;   /* minimum viable */
+            if (slots > 512) slots = 512;  /* safety cap */
+            c->exp_cache_cap = slots;
+            c->exp_cache_stride = exp_stride(c);
+            c->exp_cache = (uint8_t *)calloc(c->exp_cache_cap, c->exp_cache_stride);
+            c->exp_cache_map = (int32_t *)malloc(c->n_layers * N_EXP * sizeof(int32_t));
+            c->exp_cache_heat = (uint16_t *)calloc(c->exp_cache_cap, sizeof(uint16_t));
+            if (c->exp_cache_map) {
+                for (uint32_t i = 0; i < c->n_layers * N_EXP; i++)
+                    c->exp_cache_map[i] = -1;
+            }
+            c->exp_cache_used = 0;
+            fprintf(stderr, "[ds4] WVS expert cache: %u slots × %u bytes = %.1f MB "
+                    "(budget %.0f MB)\n",
+                    c->exp_cache_cap, c->exp_cache_stride,
+                    (double)c->exp_cache_cap * c->exp_cache_stride / 1048576.0,
+                    (double)ram_budget / 1048576.0);
+
+            /* Start prefetch thread now that cache stride is known */
+            pf_ensure_thread(c);
+        }
+    }
+}
+
+/* =========================================================================
+ * .bit1 1-bit compressed weight loader
+ * ========================================================================= */
+
+void ds4_set_bit1_path(ds4_ctx_t *c, const char *path) {
+    if (!c) return;
+
+    /* Close any existing .bit1 reader */
+    if (c->bit1) {
+        if (c->bit1->fp) fclose(c->bit1->fp);
+        free(c->bit1->index);
+        free(c->bit1);
+        c->bit1 = NULL;
+    }
+
+    if (!path) return;  /* NULL = disable .bit1 */
+
+    bit1_reader_t *b = (bit1_reader_t *)calloc(1, sizeof(bit1_reader_t));
+    if (!b) {
+        fprintf(stderr, "[ds4] ERROR: malloc bit1_reader failed\n");
+        return;
+    }
+
+    b->fp = fopen(path, "rb");
+    if (!b->fp) {
+        fprintf(stderr, "[ds4] WARN: Cannot open .bit1 file: %s\n", path);
+        free(b);
+        return;
+    }
+    InitializeCriticalSection(&b->io_lock);
+
+    /* Read header */
+    if (fread(&b->hdr, sizeof(b->hdr), 1, b->fp) != 1) {
+        fprintf(stderr, "[ds4] WARN: Failed to read .bit1 header from %s\n", path);
+        fclose(b->fp); free(b);
+        return;
+    }
+
+    /* Validate magic */
+    if (memcmp(b->hdr.magic, BIT1_MAGIC, 4) != 0) {
+        fprintf(stderr, "[ds4] WARN: Invalid .bit1 magic in %s\n", path);
+        fclose(b->fp); free(b);
+        return;
+    }
+
+    if (b->hdr.version != BIT1_VERSION) {
+        fprintf(stderr, "[ds4] WARN: .bit1 version %u != expected %u\n",
+                b->hdr.version, BIT1_VERSION);
+        fclose(b->fp); free(b);
+        return;
+    }
+
+    /* Read index */
+    b->n_entries = (size_t)b->hdr.n_layers * b->hdr.n_experts * 3;
+    b->index = (bit1_index_entry_t *)malloc(b->n_entries * sizeof(bit1_index_entry_t));
+    if (!b->index) {
+        fprintf(stderr, "[ds4] WARN: malloc .bit1 index failed\n");
+        fclose(b->fp); free(b);
+        return;
+    }
+
+    if (fread(b->index, sizeof(bit1_index_entry_t), b->n_entries, b->fp) != b->n_entries) {
+        fprintf(stderr, "[ds4] WARN: Failed to read .bit1 index from %s\n", path);
+        free(b->index); fclose(b->fp); free(b);
+        return;
+    }
+
+    c->bit1 = b;
+    {
+        /* Full file size = header + index + expert data */
+        uint64_t elems_per_mat = (uint64_t)b->hdr.n_ff * b->hdr.n_embd;
+        uint64_t blocks_per_mat = elems_per_mat / b->hdr.block_size;
+        uint64_t mat_size = blocks_per_mat * 6; /* Q1_0: 6 bytes/block */
+        uint64_t data_size = (uint64_t)b->n_entries * mat_size;
+        uint64_t total = (uint64_t)sizeof(bit1_header_t)
+                       + (uint64_t)(b->n_entries * sizeof(bit1_index_entry_t))
+                       + data_size;
+        fprintf(stderr, "[ds4] .bit1 loaded: %s (%u layers × %u experts, %.1f GB total, %.1f MB/expert)\n",
+                path, b->hdr.n_layers, b->hdr.n_experts,
+                (double)total / 1073741824.0, (double)mat_size / 1048576.0);
+    }
+}
+
+/* =========================================================================
  * Per-layer forward
  * ========================================================================= */
 static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     const gguf_split_t *s = c->split;
     char name[192];
+    LARGE_INTEGER pfreq, pstart;
+    QueryPerformanceFrequency(&pfreq);
+    QueryPerformanceCounter(&pstart);
 
     const float *anorm   = c->fast_path_ready ? c->layer_anorm[l]   : c->anorm;
     const float *fnorm   = c->fast_path_ready ? c->layer_fnorm[l]   : c->fnorm;
@@ -555,8 +1125,20 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
      * Fallback: use ffn_gate_inp router instead */
     memset(c->ffn_acc, 0, N_EMBD * sizeof(float));
 
-    /* --- Process routed experts from SSD (only if not in RAM Fast-Path mode) --- */
-    if (!c->fast_path_ready) {
+    /* --- Process routed experts ---
+     * Three modes:
+     *   1. WVS active → cache-guided: hot experts from RAM, cold from SSD
+     *   2. Fast-Path only → skip routed experts (legacy, quality loss)
+     *   3. No cache → read all from SSD (cold start) */
+    bool process_routed = true;
+    bool use_cache = (c->wvs != NULL);
+
+    if (!use_cache && c->fast_path_ready) {
+        /* Legacy Fast-Path: skip routed experts entirely */
+        process_routed = false;
+    }
+
+    if (process_routed) {
         snprintf(name, sizeof(name), "blk.%u.ffn_gate_inp.weight", l);
         bool has_router = read_matrix_f32(s, name, c->w_router, N_EMBD, N_EXP);
 
@@ -577,20 +1159,82 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
             for (uint32_t k = 0; k < N_ACT; k++) top[k] = (int)k;
         }
 
-        /* Process each selected expert from packed tensor */
+        /* Process each selected expert with SSD prefetch overlap */
+        bool pf_on = (c->pf_thread != NULL);
+
+        /* Determine which experts need SSD reads (cache miss → prefetch candidate) */
+        bool needs_pf[N_ACT];
+        for (uint32_t k = 0; k < N_ACT; k++)
+            needs_pf[k] = use_cache && (c->exp_cache_map[l * N_EXP + top[k]] < 0);
+
+        /* Start prefetch for first uncached expert */
+        int pf_idx = -1;
+        if (pf_on) {
+            for (uint32_t k = 0; k < N_ACT; k++) {
+                if (needs_pf[k]) {
+                    pf_start(c, l, (uint32_t)top[k]);
+                    pf_idx = (int)k;
+                    break;
+                }
+            }
+        }
+
         for (uint32_t k = 0; k < N_ACT; k++) {
             int eid = top[k];
 
-            snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", l);
-            bool ok_g = read_expert_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF, (uint32_t)eid);
+            /* Record access to WVS (if available) */
+            if (c->wvs) {
+                char exp_key[64];
+                snprintf(exp_key, sizeof(exp_key), "blk.%u.exp_%d", l, eid);
+                ct_wvs_record_access(c->wvs, exp_key);
+            }
 
-            snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", l);
-            bool ok_u = read_expert_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF, (uint32_t)eid);
+            /* Try cache first, fall back to SSD */
+            bool from_cache = false;
+            if (use_cache) {
+                const uint8_t *preloaded = NULL;
 
-            snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", l);
-            bool ok_d = read_expert_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD, (uint32_t)eid);
+                /* If this expert was being prefetched, wait and use its buffer */
+                if (pf_on && needs_pf[k] && pf_idx == (int)k) {
+                    preloaded = pf_wait(c);
+                    /* IMPORTANT: consume prefetched data BEFORE starting next
+                     * prefetch — the next pf_start overwrites c->pf_buf */
+                    from_cache = exp_cache_ensure(c, l, (uint32_t)eid, preloaded);
+                    if (from_cache) {
+                        int32_t slot = c->exp_cache_map[l * N_EXP + eid];
+                        const uint8_t *raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+                        dequant_expert_cache(c, raw, c->wg_e, c->wu_e, c->wd_e);
+                    }
 
-            if (!ok_g || !ok_u || !ok_d) continue;
+                    /* Start prefetch for next uncached expert */
+                    pf_idx = -1;
+                    for (uint32_t k2 = k + 1; k2 < N_ACT; k2++) {
+                        if (needs_pf[k2]) {
+                            pf_start(c, l, (uint32_t)top[k2]);
+                            pf_idx = (int)k2;
+                            break;
+                        }
+                    }
+                } else {
+                    from_cache = exp_cache_ensure(c, l, (uint32_t)eid, preloaded);
+                    if (from_cache) {
+                        int32_t slot = c->exp_cache_map[l * N_EXP + eid];
+                        const uint8_t *raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+                        dequant_expert_cache(c, raw, c->wg_e, c->wu_e, c->wd_e);
+                    }
+                }
+            }
+
+            if (!from_cache) {
+                /* Read from SSD (fallback: no cache or prefetch failed) */
+                snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", l);
+                bool ok_g = read_expert_matrix_f32(s, name, c->wg_e, N_EMBD, N_FF, (uint32_t)eid);
+                snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", l);
+                bool ok_u = read_expert_matrix_f32(s, name, c->wu_e, N_EMBD, N_FF, (uint32_t)eid);
+                snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", l);
+                bool ok_d = read_expert_matrix_f32(s, name, c->wd_e, N_FF, N_EMBD, (uint32_t)eid);
+                if (!ok_g || !ok_u || !ok_d) continue;
+            }
 
             /* SwiGLU */
             matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
@@ -600,6 +1244,23 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
 
             matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
             for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
+        }
+
+        /* Expert loop timing */
+        if (l % 10 == 0) {
+            LARGE_INTEGER pend;
+            QueryPerformanceCounter(&pend);
+            double dt_exp = (double)(pend.QuadPart - pstart.QuadPart) / pfreq.QuadPart;
+            fprintf(stderr, "[ds4]   expert loop %u: %.2fs wall\n", l, dt_exp);
+        }
+
+        /* Periodic WVS decay */
+        if (c->wvs) {
+            c->token_count++;
+            if (c->token_count >= DS4_EXP_WVS_DECAY_INTERVAL) {
+                ct_wvs_update_all(c->wvs);
+                c->token_count = 0;
+            }
         }
     }
 
@@ -626,14 +1287,26 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
 
     /* Residual add with 1/N_ACT scaling for expert accumulation */
     for (uint32_t i = 0; i < N_EMBD; i++) c->x[i] += c->ffn_acc[i] * (1.0f / (float)(N_ACT + 1));
+
+    /* Per-layer timing (print every 10th layer) */
+    if (l % 10 == 0) {
+        LARGE_INTEGER pend;
+        QueryPerformanceCounter(&pend);
+        double dt = (double)(pend.QuadPart - pstart.QuadPart) / pfreq.QuadPart;
+        fprintf(stderr, "[ds4] layer %3u: %.2fs wall (fast=%d cache=%d)\n",
+                l, dt, (int)c->fast_path_ready, (int)(c->wvs != NULL));
+    }
 }
 
 /* =========================================================================
  * Full forward pass
  * ========================================================================= */
 const float *ds4_forward(ds4_ctx_t *c, int32_t token, uint32_t pos) {
-    if (!c || !c->split) return NULL;
-
+    if (!c || !c->split) { fprintf(stderr, "[ds4] forward FAIL: c=%p split=%p\n", (void*)c, c? (void*)c->split : NULL); return NULL; }
+    LARGE_INTEGER fw_freq, fw_start;
+    QueryPerformanceFrequency(&fw_freq);
+    QueryPerformanceCounter(&fw_start);
+    fprintf(stderr, "[ds4] forward BEGIN token=%d pos=%u\n", token, pos);
     /* ---- Embedding: token_embd_bf16 RAM cache (O(1) lookup) ---- */
     if (c->token_embd_bf16) {
         const uint16_t *row = c->token_embd_bf16 + (size_t)(uint32_t)token * N_EMBD;
@@ -709,6 +1382,15 @@ const float *ds4_forward(ds4_ctx_t *c, int32_t token, uint32_t pos) {
     }
 
     if (pos >= c->kv_len) c->kv_len = pos + 1;
+
+    /* Forward wall-time estimate (QueryPerformanceCounter) */
+    {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double elapsed = (double)(now.QuadPart - fw_start.QuadPart) / fw_freq.QuadPart;
+        fprintf(stderr, "[ds4] forward token=%d pos=%u: %.2fs abs\n", token, pos, elapsed);
+    }
+
     return c->logits;
 }
 

@@ -64,6 +64,7 @@ typedef struct {
     const char  *model_path;    /* single-file GGUF path (backward compat) */
     const char **model_parts;  /* array of part paths for split GGUF (DeepSeek-V4-Flash) */
     int          n_model_parts; /* number of parts (0 = use model_path) */
+    const char  *bit1_path;     /* optional .bit1 1-bit compressed weights file */
     const char  *api_base;      /* for API backend */
     const char  *api_key;       /* for API backend */
     uint32_t     ctx_size;      /* context window */

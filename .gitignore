@@ -3,6 +3,7 @@ build/
 *.o
 *.a
 *.exe
+*.s
 
 # Python
 __pycache__/

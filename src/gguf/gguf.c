@@ -8,6 +8,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Thread-safety lock for concurrent reads (prefetch thread + main thread) */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define LOCK_INIT(l)   do { CRITICAL_SECTION *cs = (CRITICAL_SECTION*)malloc(sizeof(CRITICAL_SECTION)); if(cs){InitializeCriticalSection(cs);(l)=cs;} } while(0)
+#define LOCK_DESTROY(l) do { if(l){CRITICAL_SECTION *cs=(CRITICAL_SECTION*)(l);DeleteCriticalSection(cs);free(cs);(l)=NULL;} } while(0)
+#define LOCK_ENTER(l)   EnterCriticalSection((CRITICAL_SECTION*)(l))
+#define LOCK_LEAVE(l)   LeaveCriticalSection((CRITICAL_SECTION*)(l))
+#else
+#include <pthread.h>
+#define LOCK_INIT(l)   do { pthread_mutex_t *m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t)); if(m){pthread_mutex_init(m,NULL);(l)=m;} } while(0)
+#define LOCK_DESTROY(l) do { if(l){pthread_mutex_destroy((pthread_mutex_t*)(l));free(l);(l)=NULL;} } while(0)
+#define LOCK_ENTER(l)   pthread_mutex_lock((pthread_mutex_t*)(l))
+#define LOCK_LEAVE(l)   pthread_mutex_unlock((pthread_mutex_t*)(l))
+#endif
+
 /* 64-bit file seek — Windows uses _fseeki64, POSIX uses fseeko */
 #ifdef _WIN32
 #  define FSEEK64(fp, off, whence)  _fseeki64((fp), (off), (whence))
@@ -30,6 +46,7 @@ gguf_file_t *gguf_open(const char *path) {
     gguf_file_t *g = (gguf_file_t *)calloc(1, sizeof(gguf_file_t));
     if (!g) { fclose(fp); return NULL; }
     g->fp = fp;
+    LOCK_INIT(g->io_lock);
 
     uint8_t hdr[24];
     if (fread(hdr, 1, 24, fp) != 24) { gguf_close(g); return NULL; }
@@ -212,8 +229,14 @@ bool gguf_read_tensor_at(const gguf_file_t *g, const char *name, void *dst,
     const gguf_tensor_info_t *t = gguf_find_tensor(g, name);
     if (!t || !dst) return false;
     int64_t seek_pos = (int64_t)(g->data_offset + t->offset + byte_offset);
-    if (FSEEK64(g->fp, seek_pos, SEEK_SET) != 0) return false;
-    return fread(dst, 1, dst_size, g->fp) == dst_size;
+    LOCK_ENTER(((gguf_file_t *)g)->io_lock);
+    if (FSEEK64(g->fp, seek_pos, SEEK_SET) != 0) {
+        LOCK_LEAVE(((gguf_file_t *)g)->io_lock);
+        return false;
+    }
+    bool ok = (fread(dst, 1, dst_size, g->fp) == dst_size);
+    LOCK_LEAVE(((gguf_file_t *)g)->io_lock);
+    return ok;
 }
 
 /* Architecture-agnostic accessors: try deepseek4.*, fall back to llama.* */
@@ -367,12 +390,16 @@ bool gguf_split_read_tensor_at(const gguf_split_t *s, const char *name,
         if (!part) return false;
         const gguf_tensor_info_t *t = &s->tensors[i];
         int64_t seek_pos = (int64_t)(part->data_offset + t->offset + byte_offset);
+        LOCK_ENTER(part->io_lock);
         if (FSEEK64(part->fp, seek_pos, SEEK_SET) != 0) {
+            LOCK_LEAVE(part->io_lock);
             fprintf(stderr, "[gguf_split] fseek64 failed: tensor=%s off=%lld\n",
                     name, (long long)seek_pos);
             return false;
         }
-        return fread(dst, 1, dst_size, part->fp) == dst_size;
+        bool ok = (fread(dst, 1, dst_size, part->fp) == dst_size);
+        LOCK_LEAVE(part->io_lock);
+        return ok;
     }
     return false; /* tensor not found */
 }

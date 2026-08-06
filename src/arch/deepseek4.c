@@ -49,6 +49,14 @@ static int32_t ds4bk_argmax(const float *logits, uint32_t n_vocab) {
     return ds4_argmax(logits, n_vocab);
 }
 
+static void ds4bk_set_wvs(void *ctx, void *wvs, void *awm, uint64_t ram_budget) {
+    if (ctx) ds4_set_wvs((ds4_ctx_t *)ctx, (struct ct_wvs_s *)wvs, (struct ct_awm_s *)awm, ram_budget);
+}
+
+static void ds4bk_set_bit1_path(void *ctx, const char *path) {
+    if (ctx) ds4_set_bit1_path((ds4_ctx_t *)ctx, path);
+}
+
 /* ---------------------------------------------------------------------------
  * Public ops accessor
  * ------------------------------------------------------------------------- */
@@ -61,6 +69,8 @@ static const ct_arch_ops_t g_ds4_ops = {
     .reset          = ds4bk_reset,
     .forward        = ds4bk_forward,
     .argmax         = ds4bk_argmax,
+    .set_wvs        = ds4bk_set_wvs,
+    .set_bit1_path  = ds4bk_set_bit1_path,
 };
 
 const ct_arch_ops_t *ct_arch_deepseek4_ops(void) {

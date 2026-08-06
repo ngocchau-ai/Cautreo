@@ -118,6 +118,7 @@ typedef struct {
     gguf_kv_t        *kv;
     gguf_tensor_info_t *tensors;
     uint64_t data_offset;   /* offset của vùng tensor data */
+    void   *io_lock;        /* thread-safety lock for lazy reads (CRITICAL_SECTION*) */
 } gguf_file_t;
 
 /* Lifecycle */

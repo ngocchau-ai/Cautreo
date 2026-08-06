@@ -58,6 +58,17 @@ typedef struct ct_arch_ops {
     /* Inference */
     const float *(*forward)(void *ctx, int32_t token, uint32_t pos);
     int32_t      (*argmax)(const float *logits, uint32_t n_vocab);
+
+    /* Optional: attach WVS + AWM for adaptive weight caching.
+     * Backends that support WVS-guided caching implement this.
+     * `ram_budget` = total RAM budget in bytes for expert cache.
+     * May be NULL. */
+    void (*set_wvs)(void *ctx, void *wvs, void *awm, uint64_t ram_budget);
+
+    /* Optional: load .bit1 1-bit compressed weights file.
+     * Backends that support .bit1 format implement this.
+     * May be NULL. */
+    void (*set_bit1_path)(void *ctx, const char *path);
 } ct_arch_ops_t;
 
 /* ---------------------------------------------------------------------------
