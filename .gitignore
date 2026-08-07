@@ -33,8 +33,18 @@ kv_cache_*.kv
 bench_kv.bin
 *_synth.gguf
 
-# Codegraph output is committed but large JSON can be ignored
-# memory/03-codegraph/*.json
+# Internal / private — NOT pushed to GitHub
+.internal/
+
+# Old paths (moved to .internal/)
+memory/
+shared_memory.json
+probe_gen.c
+wvssize_test.c
+_ds4.s
+docs/architecture-v2.md
+docs/engine-reanalysis.md
+docs/session-correlation.md
 
 # GitHub Actions (add if/when CI is configured)
 # .github/

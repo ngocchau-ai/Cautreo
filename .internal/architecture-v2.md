@@ -276,6 +276,21 @@ Forward pass gọi WVS/AWM qua mỗi token:
 - Online learning: cập nhật WVS liên tục
 - **Persist** bảng điểm giữa các lần chạy → **mỗi lần chạy model nhanh hơn** (đã biết trọng số nào cần)
 
+### LỚP 7: Session Correlator (bổ sung) — Bootstrapping WVS từ Agent History
+
+**Giải quyết cold start** — thay vì khởi tạo WVS với `hotness_score=1.0` cho mọi entry,
+dùng lịch sử chat từ các agent (Hermes, Antigravity, Codex) để seed initial scores.
+
+**Luồng:**
+```
+Session Chat ──→ Topic Analysis ──→ Expert Correlation ──→ Seed WVS ──→ Inference
+                    ↑                                              ↑
+              Keyword/domain                              Profiler (online)
+              frequency                                    refine scores
+```
+
+**Chi tiết:** [`docs/session-correlation.md`](session-correlation.md)
+
 ---
 
 ## 5. So sánh với DS4 & WASTE gốc

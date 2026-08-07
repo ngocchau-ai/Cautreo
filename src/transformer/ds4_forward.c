@@ -56,6 +56,15 @@ static float bf16_to_f32(uint16_t v) {
     return f;
 }
 
+/* float32 → BF16 (bfloat16), round-to-nearest-even */
+static uint16_t f32_to_bf16(float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof(bits));
+    /* Round to nearest even: add rounding bias then truncate */
+    uint32_t rounding_bias = ((bits >> 16) & 1) + 0x7FFF;
+    return (uint16_t)((bits + rounding_bias) >> 16);
+}
+
 /* MXFP4 e2m1 lookup (signed) */
 static const float E2M1_TABLE[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
@@ -234,7 +243,184 @@ static void matvec(const float *A, const float *x, float *y, uint32_t n_out, uin
     }
 }
 
+/* BF16 matvec: weights stored as bfloat16, converted on-the-fly with AVX2.
+ * Halves memory bandwidth vs f32 matvec. Exact precision (BF16→f32 lossless). */
+static void matvec_bf16(const uint16_t *A, const float *x, float *y,
+                         uint32_t n_out, uint32_t n_in) {
+#pragma omp parallel for schedule(static) if(n_out > 256)
+    for (int32_t i = 0; i < (int32_t)n_out; i++) {
+        const uint16_t *row = A + (size_t)i * n_in;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        uint32_t j;
+        for (j = 0; j + 16 <= n_in; j += 16) {
+            __m256 x0 = _mm256_loadu_ps(x + j);
+            __m256 x1 = _mm256_loadu_ps(x + j + 8);
+            /* Load 16 BF16 values, zero-extend to 32-bit, shift left 16 to form float32 */
+            __m128i raw_lo = _mm_loadu_si128((const __m128i *)(row + j + 0));
+            __m128i raw_hi = _mm_loadu_si128((const __m128i *)(row + j + 8));
+            __m256 w0 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_lo), 16));
+            __m256 w1 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_hi), 16));
+            acc0 = _mm256_fmadd_ps(w0, x0, acc0);
+            acc1 = _mm256_fmadd_ps(w1, x1, acc1);
+        }
+        __m256 sum = _mm256_add_ps(acc0, acc1);
+        __m128 hi = _mm256_extractf128_ps(sum, 1);
+        __m128 lo = _mm256_castps256_ps128(sum);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        float s = _mm_cvtss_f32(sum128);
+        for (; j < n_in; j++) s += bf16_to_f32(row[j]) * x[j];
+        y[i] = s;
+#else
+        double acc = 0.0;
+        for (uint32_t j = 0; j < n_in; j++) acc += (double)bf16_to_f32(row[j]) * x[j];
+        y[i] = (float)acc;
+#endif
+    }
+}
+
 static float silu_f(float x) { return x / (1.0f + expf(-x)); }
+
+/* ── Fused dequant + matvec for Q1_0 (1-bit) ────────────────────────────
+ * Dequantizes each Q1_0 block on-the-fly and computes dot product with x,
+ * avoiding the 100 MB intermediate f32 buffer per expert.
+ * A_q: Q1_0 blocks (n_out × blocks_per_row), x: input (n_in), y: output (n_out).
+ * n_in must be multiple of 32. */
+static void dequant_matvec_q1_0(const ct_q1_0_block_t *A_q, const float *x,
+                                 float *y, uint32_t n_out, uint32_t n_in) {
+    const uint32_t blocks_per_row = n_in / CT_QUANT_BLOCK_SIZE; /* 128 for 4096 */
+#pragma omp parallel for schedule(static) if(n_out > 256)
+    for (int32_t i = 0; i < (int32_t)n_out; i++) {
+        const ct_q1_0_block_t *row_q = A_q + (size_t)i * blocks_per_row;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        int group = 0;
+        for (uint32_t b = 0; b < blocks_per_row; b++) {
+            const float d = ct_quant_fp16_to_f32(row_q[b].d);
+            const __m256 d_vec = _mm256_set1_ps(d);
+            const uint32_t bits = *(const uint32_t *)row_q[b].q;
+            /* Process 4 groups of 8 elements per block */
+            for (int g = 0; g < 4; g++) {
+                const uint32_t x_off = b * CT_QUANT_BLOCK_SIZE + g * 8;
+                const uint8_t byte = (uint8_t)((bits >> (g * 8)) & 0xFF);
+                const __m256 xv = _mm256_loadu_ps(x + x_off);
+                /* Expand byte to 8 sign masks: bit=1 → +1.0, bit=0 → -1.0 */
+                const __m256i bits_i = _mm256_set1_epi32((int32_t)byte);
+                const __m256i bit_mask = _mm256_set_epi32(
+                    128, 64, 32, 16, 8, 4, 2, 1);
+                const __m256i test = _mm256_and_si256(bits_i, bit_mask);
+                const __m256i cmp = _mm256_cmpeq_epi32(test, _mm256_setzero_si256());
+                /* cmp: 0xFFFFFFFF where bit=0, 0x00000000 where bit=1 */
+                const __m256 pos = _mm256_set1_ps(1.0f);
+                const __m256 neg = _mm256_set1_ps(-1.0f);
+                const __m256 sign = _mm256_blendv_ps(pos, neg, _mm256_castsi256_ps(cmp));
+                const __m256 scaled = _mm256_mul_ps(xv, sign);
+                if (group & 1)
+                    acc1 = _mm256_fmadd_ps(d_vec, scaled, acc1);
+                else
+                    acc0 = _mm256_fmadd_ps(d_vec, scaled, acc0);
+                group++;
+            }
+        }
+        /* Horizontal sum */
+        __m256 sum = _mm256_add_ps(acc0, acc1);
+        __m128 hi = _mm256_extractf128_ps(sum, 1);
+        __m128 lo = _mm256_castps256_ps128(sum);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        y[i] = _mm_cvtss_f32(sum128);
+#else
+        double acc = 0.0;
+        for (uint32_t b = 0; b < blocks_per_row; b++) {
+            const float d = ct_quant_fp16_to_f32(row_q[b].d);
+            const uint32_t bits = *(const uint32_t *)row_q[b].q;
+            for (uint32_t j = 0; j < CT_QUANT_BLOCK_SIZE; j++) {
+                const float sign = (bits & (1u << j)) ? 1.0f : -1.0f;
+                acc += (double)(d * sign) * x[b * CT_QUANT_BLOCK_SIZE + j];
+            }
+        }
+        y[i] = (float)acc;
+#endif
+    }
+}
+
+/* ── Fused dequant + matvec for MXFP4 ───────────────────────────────────
+ * Dequantizes each MXFP4 block on-the-fly and computes dot product with x.
+ * A_raw: MXFP4 bytes (n_out × row_bytes), x: input (n_in), y: output (n_out).
+ * row_blocks: blocks per row (e.g. 64 for gate/up, 128 for down).
+ * row_bytes: bytes per row (row_blocks × 17). */
+static void dequant_matvec_mxfp4(const uint8_t *A_raw, const float *x,
+                                  float *y, uint32_t n_out, uint32_t n_in,
+                                  uint32_t row_blocks, uint32_t row_bytes) {
+    (void)n_in;
+#pragma omp parallel for schedule(static) if(n_out > 256)
+    for (int32_t i = 0; i < (int32_t)n_out; i++) {
+        const uint8_t *row_raw = A_raw + (size_t)i * row_bytes;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        int group = 0;
+        for (uint32_t b = 0; b < row_blocks; b++) {
+            const uint8_t *blk = row_raw + b * 17;
+            const float scale = E8M0_SCALE[blk[0]];
+            const __m256 s_vec = _mm256_set1_ps(scale);
+            const uint8_t *data = blk + 1;
+            /* Process 4 groups of 8 elements (4 bytes = 8 nibbles each) */
+            for (int g = 0; g < 4; g++) {
+                const uint32_t x_off = b * 32 + g * 8;
+                const __m256 xv = _mm256_loadu_ps(x + x_off);
+                /* Load 4 bytes containing 8 nibbles */
+                uint32_t nibs;
+                memcpy(&nibs, data + g * 4, 4);
+                /* Extract 8 nibbles into int32 indices for table lookup */
+                const __m256i idx = _mm256_set_epi32(
+                    (int)((nibs >> 28) & 0xF),
+                    (int)((nibs >> 24) & 0xF),
+                    (int)((nibs >> 20) & 0xF),
+                    (int)((nibs >> 16) & 0xF),
+                    (int)((nibs >> 12) & 0xF),
+                    (int)((nibs >> 8)  & 0xF),
+                    (int)((nibs >> 4)  & 0xF),
+                    (int)((nibs >> 0)  & 0xF)
+                );
+                /* Gather from E2M1_TABLE (16-entry float LUT) */
+                __m256 vals = _mm256_i32gather_ps(E2M1_TABLE, idx, 4);
+                vals = _mm256_mul_ps(vals, s_vec);
+                if (group & 1)
+                    acc1 = _mm256_fmadd_ps(vals, xv, acc1);
+                else
+                    acc0 = _mm256_fmadd_ps(vals, xv, acc0);
+                group++;
+            }
+        }
+        /* Horizontal sum */
+        __m256 sum = _mm256_add_ps(acc0, acc1);
+        __m128 hi = _mm256_extractf128_ps(sum, 1);
+        __m128 lo = _mm256_castps256_ps128(sum);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        y[i] = _mm_cvtss_f32(sum128);
+#else
+        double acc = 0.0;
+        for (uint32_t b = 0; b < row_blocks; b++) {
+            const uint8_t *blk = row_raw + b * 17;
+            const float scale = E8M0_SCALE[blk[0]];
+            const uint8_t *data = blk + 1;
+            for (uint32_t j = 0; j < 32; j++) {
+                const uint8_t nibble = (j & 1) ? (data[j >> 1] >> 4) : (data[j >> 1] & 0x0F);
+                acc += (double)(E2M1_TABLE[nibble] * scale) * x[b * 32 + j];
+            }
+        }
+        y[i] = (float)acc;
+#endif
+    }
+}
 
 /* =========================================================================
  * DS4 context
@@ -253,12 +439,12 @@ static float silu_f(float x) { return x / (1.0f + expf(-x)); }
 
 /* ── .bit1 file reader (1-bit compressed expert weights) ──────────────── */
 #define BIT1_MAGIC    "CT1B"
-#define BIT1_VERSION  1
+#define BIT1_VERSION  2
 
 #pragma pack(push, 1)
 typedef struct {
     char     magic[4];       /* "CT1B" */
-    uint32_t version;        /* 1 */
+    uint32_t version;        /* 2 — v2 adds precision map after index */
     uint32_t n_layers;       /* 43 */
     uint32_t n_experts;      /* 256 */
     uint32_t n_embd;         /* 4096 */
@@ -269,7 +455,7 @@ typedef struct {
 
 typedef struct {
     uint64_t offset;         /* byte offset from start of data section */
-    uint64_t size;           /* bytes of Q1_0 data */
+    uint64_t size;           /* bytes of Q1_0 data (0 = expert not in .bit1) */
 } bit1_index_entry_t;
 #pragma pack(pop)
 
@@ -277,6 +463,7 @@ typedef struct {
     FILE              *fp;       /* .bit1 file handle (NULL = not loaded) */
     bit1_header_t      hdr;      /* file header */
     bit1_index_entry_t *index;   /* [n_layers × n_experts × 3] */
+    uint8_t            *precision;/* [n_layers × n_experts]: 0=MXFP4(GGUF), 1=Q1_0(.bit1) */
     size_t             n_entries;/* n_layers * n_experts * 3 */
     CRITICAL_SECTION   io_lock;  /* guards fseeko/fread (shared with prefetch thread) */
 } bit1_reader_t;
@@ -300,10 +487,16 @@ struct ds4_ctx {
     float *scores;    /* [ctx] */
     /* FFN */
     float *router;    /* [N_EXP] */
-    float *ffn_mid;   /* [N_FF] */
-    float *ffn_up;    /* [N_FF] */
+    float *ffn_mid;   /* [N_FF] — single expert mid (sequential fallback) */
+    float *ffn_up;    /* [N_FF] — single expert up */
     float *ffn_acc;   /* [N_EMBD] */
     float *ffn_tmp;   /* [N_EMBD] scratch buffer */
+    /* Per-expert buffers for Phase F: parallel expert processing.
+     * Each of the N_ACT=6 active experts gets its own slot so they can
+     * be computed in parallel without data races. */
+    float *ffn_mid_pt; /* [N_ACT × N_FF] — expert k at [k*N_FF + i] */
+    float *ffn_up_pt;  /* [N_ACT × N_FF] */
+    float *ffn_tmp_pt; /* [N_ACT × N_EMBD] */
     float *logits;    /* [N_VOCAB] */
     /* Norm weight caches (loaded per layer) */
     float *anorm;     /* [N_EMBD] */
@@ -333,21 +526,32 @@ struct ds4_ctx {
     float **layer_shexp_g;   /* 43 × [N_FF * N_EMBD] */
     float **layer_shexp_u;   /* 43 × [N_FF * N_EMBD] */
     float **layer_shexp_d;   /* 43 × [N_EMBD * N_FF] */
+    /* BF16 variants: halve RAM bandwidth for shared expert + attention projections */
+    uint16_t **layer_shexp_g_bf16; /* 43 × [N_FF * N_EMBD] BF16 */
+    uint16_t **layer_shexp_u_bf16; /* 43 × [N_FF * N_EMBD] BF16 */
+    uint16_t **layer_shexp_d_bf16; /* 43 × [N_EMBD * N_FF] BF16 */
+    uint16_t **layer_wq_a_bf16;    /* 43 × [Q_DIM * N_EMBD] BF16 */
+    uint16_t **layer_wkv_bf16;     /* 43 × [KV_DIM * N_EMBD] BF16 */
     bool    fast_path_ready;
 
     /* ── WVS-guided expert cache (adaptive, learns over time) ── */
     struct ct_wvs_s *wvs;    /* heat tracker (NULL = legacy Fast-Path) */
     struct ct_awm_s *awm;    /* RAM budget manager (may be NULL) */
     uint32_t token_count;    /* for periodic WVS decay */
+    uint32_t ctx_window_size; /* Phase E: large-context window (default 256) */
+    uint32_t tokens_in_window;/* tokens processed in current window */
 
     /* Raw MXFP4 bytes for cached routed experts.
      * Each slot = one expert: gate + up + down raw bytes.
-     * Managed by WVS heat: hot experts cached, cold evicted. */
+     * Managed by WVS heat: hot experts cached, cold evicted.
+     * Format per slot tracked by exp_cache_format[slot]:
+     *   0 = MXFP4 (from GGUF), 1 = Q1_0 (from .bit1) */
     uint8_t  *exp_cache;     /* flat byte array [cap × stride] */
     uint32_t  exp_cache_cap; /* number of expert slots */
     uint32_t  exp_cache_stride; /* bytes per expert (gate+up+down) */
     int32_t  *exp_cache_map; /* [n_layers × N_EXP] → slot, -1 = not cached */
     uint16_t *exp_cache_heat;/* [cap] LRU heat for eviction */
+    uint8_t  *exp_cache_format;/* [cap] 0=MXFP4, 1=Q1_0 */
     uint32_t  exp_cache_used;
 
     /* ── SSD prefetch (overlap I/O with compute) ── */
@@ -373,6 +577,8 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
     c->ctx_size = ctx_size ? ctx_size : 512;
     c->n_layers = 43;
     c->kv_len = 0;
+    c->ctx_window_size = 256; /* Phase E: large-context window */
+    c->tokens_in_window = 0;
 
     /* One-time init for dequant lookup tables */
     e8m0_init_table();
@@ -393,6 +599,10 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
     c->ffn_up   = (float *)malloc(N_FF * sizeof(float));
     c->ffn_acc  = (float *)malloc(N_EMBD * sizeof(float));
     c->ffn_tmp  = (float *)malloc(N_EMBD * sizeof(float));
+    /* Phase F: per-expert parallel compute buffers */
+    c->ffn_mid_pt = (float *)malloc((size_t)N_ACT * N_FF * sizeof(float));
+    c->ffn_up_pt  = (float *)malloc((size_t)N_ACT * N_FF * sizeof(float));
+    c->ffn_tmp_pt = (float *)malloc((size_t)N_ACT * N_EMBD * sizeof(float));
     c->logits   = (float *)malloc(N_VOCAB * sizeof(float));
     c->anorm    = (float *)malloc(N_EMBD * sizeof(float));
     c->fnorm    = (float *)malloc(N_EMBD * sizeof(float));
@@ -411,7 +621,8 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
 
     if (!c->kv_cache || !c->x || !c->h || !c->q_a || !c->q_b || !c->kv_a ||
         !c->attn_out || !c->scores || !c->router || !c->ffn_mid || !c->ffn_up ||
-        !c->ffn_acc || !c->logits || !c->anorm || !c->fnorm || !c->kv_anorm ||
+        !c->ffn_acc || !c->ffn_tmp || !c->ffn_mid_pt || !c->ffn_up_pt || !c->ffn_tmp_pt ||
+        !c->logits || !c->anorm || !c->fnorm || !c->kv_anorm ||
         !c->q_anorm || !c->wq_a || !c->wq_b || !c->wkv || !c->wo_a ||
         !c->w_router || !c->wg_e || !c->wu_e || !c->wd_e) {
         ds4_free(c); return NULL;
@@ -469,9 +680,17 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
     c->layer_shexp_g = (float **)calloc(c->n_layers, sizeof(float *));
     c->layer_shexp_u = (float **)calloc(c->n_layers, sizeof(float *));
     c->layer_shexp_d = (float **)calloc(c->n_layers, sizeof(float *));
+    /* BF16 variants: halve RAM bandwidth for large weight matrices */
+    c->layer_shexp_g_bf16 = (uint16_t **)calloc(c->n_layers, sizeof(uint16_t *));
+    c->layer_shexp_u_bf16 = (uint16_t **)calloc(c->n_layers, sizeof(uint16_t *));
+    c->layer_shexp_d_bf16 = (uint16_t **)calloc(c->n_layers, sizeof(uint16_t *));
+    c->layer_wq_a_bf16    = (uint16_t **)calloc(c->n_layers, sizeof(uint16_t *));
+    c->layer_wkv_bf16     = (uint16_t **)calloc(c->n_layers, sizeof(uint16_t *));
 
     if (c->layer_anorm && c->layer_fnorm && c->layer_wq_a && c->layer_wkv &&
-        c->layer_shexp_g && c->layer_shexp_u && c->layer_shexp_d) {
+        c->layer_shexp_g && c->layer_shexp_u && c->layer_shexp_d &&
+        c->layer_shexp_g_bf16 && c->layer_shexp_u_bf16 && c->layer_shexp_d_bf16 &&
+        c->layer_wq_a_bf16 && c->layer_wkv_bf16) {
         uint32_t loaded_layers = 0;
         char name[192];
         for (uint32_t l = 0; l < c->n_layers; l++) {
@@ -482,6 +701,12 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
             c->layer_shexp_g[l] = (float *)malloc((size_t)N_FF * N_EMBD * sizeof(float));
             c->layer_shexp_u[l] = (float *)malloc((size_t)N_FF * N_EMBD * sizeof(float));
             c->layer_shexp_d[l] = (float *)malloc((size_t)N_EMBD * N_FF * sizeof(float));
+            /* BF16: read_matrix_bf16 handles allocation internally */
+            c->layer_shexp_g_bf16[l] = NULL;
+            c->layer_shexp_u_bf16[l] = NULL;
+            c->layer_shexp_d_bf16[l] = NULL;
+            c->layer_wq_a_bf16[l]    = NULL;
+            c->layer_wkv_bf16[l]     = NULL;
 
             if (!c->layer_anorm[l] || !c->layer_fnorm[l] || !c->layer_wq_a[l] ||
                 !c->layer_wkv[l] || !c->layer_shexp_g[l] || !c->layer_shexp_u[l] ||
@@ -493,26 +718,63 @@ ds4_ctx_t *ds4_create(const gguf_split_t *split, uint32_t ctx_size) {
             snprintf(name, sizeof(name), "blk.%u.ffn_norm.weight", l);
             read_matrix_f32(split, name, c->layer_fnorm[l], N_EMBD, 1);
 
+            /* Attention projections: store as BF16 for 2× bandwidth savings */
             snprintf(name, sizeof(name), "blk.%u.attn_q_a.weight", l);
             read_matrix_f32(split, name, c->layer_wq_a[l], N_EMBD, Q_DIM);
+            {
+                size_t n = (size_t)Q_DIM * N_EMBD;
+                c->layer_wq_a_bf16[l] = (uint16_t *)malloc(n * sizeof(uint16_t));
+                if (c->layer_wq_a_bf16[l])
+                    for (size_t i = 0; i < n; i++)
+                        c->layer_wq_a_bf16[l][i] = f32_to_bf16(c->layer_wq_a[l][i]);
+            }
 
             snprintf(name, sizeof(name), "blk.%u.attn_kv.weight", l);
             read_matrix_f32(split, name, c->layer_wkv[l], N_EMBD, KV_DIM);
+            {
+                size_t n = (size_t)KV_DIM * N_EMBD;
+                c->layer_wkv_bf16[l] = (uint16_t *)malloc(n * sizeof(uint16_t));
+                if (c->layer_wkv_bf16[l])
+                    for (size_t i = 0; i < n; i++)
+                        c->layer_wkv_bf16[l][i] = f32_to_bf16(c->layer_wkv[l][i]);
+            }
 
+            /* Shared expert: store as BF16 for 2× bandwidth savings */
             snprintf(name, sizeof(name), "blk.%u.ffn_gate_shexp.weight", l);
             read_matrix_f32(split, name, c->layer_shexp_g[l], N_EMBD, N_FF);
+            {
+                size_t n = (size_t)N_FF * N_EMBD;
+                c->layer_shexp_g_bf16[l] = (uint16_t *)malloc(n * sizeof(uint16_t));
+                if (c->layer_shexp_g_bf16[l])
+                    for (size_t i = 0; i < n; i++)
+                        c->layer_shexp_g_bf16[l][i] = f32_to_bf16(c->layer_shexp_g[l][i]);
+            }
 
             snprintf(name, sizeof(name), "blk.%u.ffn_up_shexp.weight", l);
             read_matrix_f32(split, name, c->layer_shexp_u[l], N_EMBD, N_FF);
+            {
+                size_t n = (size_t)N_FF * N_EMBD;
+                c->layer_shexp_u_bf16[l] = (uint16_t *)malloc(n * sizeof(uint16_t));
+                if (c->layer_shexp_u_bf16[l])
+                    for (size_t i = 0; i < n; i++)
+                        c->layer_shexp_u_bf16[l][i] = f32_to_bf16(c->layer_shexp_u[l][i]);
+            }
 
             snprintf(name, sizeof(name), "blk.%u.ffn_down_shexp.weight", l);
             read_matrix_f32(split, name, c->layer_shexp_d[l], N_FF, N_EMBD);
+            {
+                size_t n = (size_t)N_EMBD * N_FF;
+                c->layer_shexp_d_bf16[l] = (uint16_t *)malloc(n * sizeof(uint16_t));
+                if (c->layer_shexp_d_bf16[l])
+                    for (size_t i = 0; i < n; i++)
+                        c->layer_shexp_d_bf16[l][i] = f32_to_bf16(c->layer_shexp_d[l][i]);
+            }
 
             loaded_layers++;
         }
         if (loaded_layers == c->n_layers) {
             c->fast_path_ready = true;
-            fprintf(stderr, "[ds4] Fast-Path RAM layer cache loaded: 43 layers OK (~5.4 GB RAM)\n");
+            fprintf(stderr, "[ds4] Fast-Path RAM layer cache loaded: 43 layers OK (~3.8 GB RAM, BF16 shared+attn)\n");
         } else {
             fprintf(stderr, "[ds4] WARN: RAM layer cache partial (%u/43 layers)\n", loaded_layers);
         }
@@ -553,15 +815,28 @@ void ds4_free(ds4_ctx_t *c) {
             free(c->layer_anorm[l]); free(c->layer_fnorm[l]);
             free(c->layer_wq_a[l]); free(c->layer_wkv[l]);
             free(c->layer_shexp_g[l]); free(c->layer_shexp_u[l]); free(c->layer_shexp_d[l]);
+            /* BF16 arrays */
+            free(c->layer_shexp_g_bf16 ? c->layer_shexp_g_bf16[l] : NULL);
+            free(c->layer_shexp_u_bf16 ? c->layer_shexp_u_bf16[l] : NULL);
+            free(c->layer_shexp_d_bf16 ? c->layer_shexp_d_bf16[l] : NULL);
+            free(c->layer_wq_a_bf16    ? c->layer_wq_a_bf16[l]    : NULL);
+            free(c->layer_wkv_bf16     ? c->layer_wkv_bf16[l]     : NULL);
         }
         free(c->layer_anorm); free(c->layer_fnorm);
         free(c->layer_wq_a); free(c->layer_wkv);
         free(c->layer_shexp_g); free(c->layer_shexp_u); free(c->layer_shexp_d);
+        /* BF16 array-of-pointers */
+        free(c->layer_shexp_g_bf16);
+        free(c->layer_shexp_u_bf16);
+        free(c->layer_shexp_d_bf16);
+        free(c->layer_wq_a_bf16);
+        free(c->layer_wkv_bf16);
     }
     free(c->kv_cache);
     free(c->x); free(c->h); free(c->q_a); free(c->q_b); free(c->kv_a);
     free(c->attn_out); free(c->scores); free(c->router);
     free(c->ffn_mid); free(c->ffn_up); free(c->ffn_acc); free(c->ffn_tmp);
+    free(c->ffn_mid_pt); free(c->ffn_up_pt); free(c->ffn_tmp_pt);
     free(c->logits); free(c->anorm); free(c->fnorm);
     free(c->kv_anorm); free(c->q_anorm);
     free(c->wq_a); free(c->wq_b); free(c->wkv); free(c->wo_a);
@@ -574,6 +849,7 @@ void ds4_free(ds4_ctx_t *c) {
     free(c->exp_cache);
     free(c->exp_cache_map);
     free(c->exp_cache_heat);
+    free(c->exp_cache_format);
 
     /* Stop prefetch thread */
     if (c->pf_thread) {
@@ -592,6 +868,7 @@ void ds4_free(ds4_ctx_t *c) {
     if (c->bit1) {
         if (c->bit1->fp) fclose(c->bit1->fp);
         DeleteCriticalSection(&c->bit1->io_lock);
+        free(c->bit1->precision);
         free(c->bit1->index);
         free(c->bit1);
         c->bit1 = NULL;
@@ -634,9 +911,26 @@ void ds4_reset(ds4_ctx_t *c) {
 #define DS4_EXP_Q1_MATRIX_BYTES (DS4_EXP_Q1_BLOCKS * sizeof(ct_q1_0_block_t)) /* 1,572,864 */
 #define DS4_EXP_Q1_STRIDE       (DS4_EXP_Q1_MATRIX_BYTES * 3) /* 4,718,592 */
 
-/* Current expert byte stride (depends on .bit1 mode). */
+/* Expert byte stride — always MXFP4 size (cache holds both MXFP4 and Q1_0). */
 static inline uint32_t exp_stride(const ds4_ctx_t *c) {
-    return c->bit1 ? (uint32_t)DS4_EXP_Q1_STRIDE : (uint32_t)DS4_EXP_CACHE_STRIDE;
+    (void)c;
+    return (uint32_t)DS4_EXP_CACHE_STRIDE;
+}
+
+/* Determine precision for an expert: 0=MXFP4(GGUF), 1=Q1_0(.bit1).
+ * Uses WVS hotness if available; falls back to .bit1 precision map (v2) or default. */
+static uint8_t exp_precision(const ds4_ctx_t *c, uint32_t layer, uint32_t exp_id) {
+    /* WVS-guided: HOT experts stay MXFP4; all others (semi-hot, warm, cold, rare) → Q1_0 */
+    if (c->wvs) {
+        char key[64];
+        snprintf(key, sizeof(key), "blk.%u.exp_%d", layer, exp_id);
+        ct_hotness_t h = ct_wvs_get_hotness(c->wvs, key);
+        return (h == CT_HOTNESS_HOT) ? 0 : 1;
+    }
+    /* Fallback: .bit1 precision map (v2) or default MXFP4 */
+    if (c->bit1 && c->bit1->precision)
+        return c->bit1->precision[layer * c->bit1->hdr.n_experts + exp_id];
+    return 0; /* default MXFP4 */
 }
 
 /* Read one expert's weights into buf.
@@ -646,13 +940,27 @@ static inline uint32_t exp_stride(const ds4_ctx_t *c) {
  * Returns true on success. */
 static bool read_expert_raw(ds4_ctx_t *c, uint32_t layer,
                              uint32_t exp_id, uint8_t *buf) {
-    /* ── .bit1 path: read Q1_0 blocks ── */
+    /* ── Determine precision for this expert ── */
+    bool use_q10 = false;
     if (c->bit1) {
+        /* .bit1 loaded: check precision map */
+        uint8_t prec = 1; /* default Q1_0 (backward compat: v1 has no map → all Q1_0) */
+        if (c->bit1->precision)
+            prec = c->bit1->precision[layer * c->bit1->hdr.n_experts + exp_id];
+        use_q10 = (prec == 1);
+    }
+
+    if (c->bit1 && use_q10) {
+        /* ── Q1_0 path: read from .bit1 file ── */
         bit1_reader_t *b = c->bit1;
         size_t base = ((size_t)layer * b->hdr.n_experts + exp_id) * 3;
         EnterCriticalSection(&b->io_lock);
         for (int m = 0; m < 3; m++) {
             const bit1_index_entry_t *ent = &b->index[base + m];
+            if (ent->size == 0) { /* expert not in .bit1 (shouldn't happen when use_q10) */
+                LeaveCriticalSection(&b->io_lock);
+                return false;
+            }
             if (_fseeki64(b->fp, (__int64)ent->offset, SEEK_SET) != 0) {
                 LeaveCriticalSection(&b->io_lock);
                 return false;
@@ -701,14 +1009,91 @@ static bool read_expert_raw(ds4_ctx_t *c, uint32_t layer,
     return true;
 }
 
+/* Read one expert's MXFP4 weights from GGUF splits (bypass .bit1).
+ * Fills buf with MXFP4 format: [gate | up | down].
+ * Returns true on success. */
+static bool read_expert_raw_gguf(ds4_ctx_t *c, uint32_t layer,
+                                  uint32_t exp_id, uint8_t *buf) {
+    const gguf_split_t *s = c->split;
+    if (!s) return false;
+    char name[192];
+
+    /* Gate: ffn_gate_exps.weight [N_FF, N_EMBD, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_gate_exps.weight", layer);
+    const gguf_tensor_info_t *ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    uint64_t gate_off = (uint64_t)exp_id * N_EMBD * DS4_EXP_GATE_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf, DS4_EXP_GATE_BYTES, gate_off))
+        return false;
+
+    /* Up: ffn_up_exps.weight [N_FF, N_EMBD, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_up_exps.weight", layer);
+    ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    uint64_t up_off = (uint64_t)exp_id * N_EMBD * DS4_EXP_GATE_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf + DS4_EXP_GATE_BYTES,
+                                    DS4_EXP_UP_BYTES, up_off))
+        return false;
+
+    /* Down: ffn_down_exps.weight [N_EMBD, N_FF, 256] */
+    snprintf(name, sizeof(name), "blk.%u.ffn_down_exps.weight", layer);
+    ti = gguf_split_find_tensor(s, name);
+    if (!ti) return false;
+    uint64_t down_off = (uint64_t)exp_id * N_FF * DS4_EXP_DOWN_ROW_BYTES;
+    if (!gguf_split_read_tensor_at(s, name, buf + DS4_EXP_GATE_BYTES + DS4_EXP_UP_BYTES,
+                                    DS4_EXP_DOWN_BYTES, down_off))
+        return false;
+
+    return true;
+}
+
+/* ── Phase D: Proactive expansion ──
+ * Upgrade Q1_0 experts in cache to MXFP4 for hot experts.
+ * Runs after WVS update to improve precision for frequently-used experts.
+ * Reads MXFP4 data from GGUF splits (bypasses .bit1). */
+static void proactive_expand_hot_experts(ds4_ctx_t *c) {
+    if (!c->wvs || !c->exp_cache || !c->split) return;
+
+    uint32_t n = ct_wvs_count(c->wvs);
+    if (n == 0) return;
+
+    uint32_t upgraded = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const ct_wvs_entry_t *entry = ct_wvs_entry(c->wvs, i);
+        if (!entry) continue;
+        if (entry->hotness != CT_HOTNESS_HOT) continue;
+
+        uint32_t layer, exp_id;
+        if (sscanf(entry->key, "blk.%u.exp_%u", &layer, &exp_id) != 2) continue;
+        if (layer >= c->n_layers || exp_id >= N_EXP) continue;
+
+        /* Check if this expert is in cache as Q1_0 (format=1) */
+        int32_t slot = c->exp_cache_map[layer * N_EXP + exp_id];
+        if (slot < 0) continue;          /* not in cache */
+        if (c->exp_cache_format[slot] == 0) continue; /* already MXFP4 */
+
+        /* Read MXFP4 data from GGUF (bypass .bit1) and overwrite cache slot */
+        uint8_t *slot_ptr = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+        if (read_expert_raw_gguf(c, layer, exp_id, slot_ptr)) {
+            c->exp_cache_format[slot] = 0; /* now MXFP4 */
+            upgraded++;
+        }
+    }
+
+    if (upgraded > 0) {
+        fprintf(stderr, "[ds4] Proactive expansion: upgraded %u Q1_0 experts to MXFP4\n",
+                upgraded);
+    }
+}
+
 /* Dequant cached expert bytes into FP32 matrices.
- * If .bit1 is active, the cache holds Q1_0 blocks (dequant via ct_quant_deq1_0).
- * Otherwise, the cache holds MXFP4 raw bytes (dequant via dequant_mxfp4_block).
+ * `format`: 0=MXFP4, 1=Q1_0.
  * gate_out: [N_FF × N_EMBD], up_out: [N_FF × N_EMBD], down_out: [N_EMBD × N_FF] */
 static void dequant_expert_cache(ds4_ctx_t *c, const uint8_t *raw,
-                                  float *gate_out, float *up_out, float *down_out) {
+                                  float *gate_out, float *up_out, float *down_out,
+                                  uint8_t format) {
     /* ── Q1_0 dequant path ── */
-    if (c->bit1) {
+    if (format == 1) {
         const ct_q1_0_block_t *q1_gate = (const ct_q1_0_block_t *)raw;
         const ct_q1_0_block_t *q1_up   = (const ct_q1_0_block_t *)(raw + DS4_EXP_Q1_MATRIX_BYTES);
         const ct_q1_0_block_t *q1_down = (const ct_q1_0_block_t *)(raw + DS4_EXP_Q1_MATRIX_BYTES * 2);
@@ -820,6 +1205,7 @@ static bool exp_cache_ensure(ds4_ctx_t *c, uint32_t layer, uint32_t exp_id,
 
     c->exp_cache_map[layer * N_EXP + exp_id] = free_slot;
     c->exp_cache_heat[free_slot] = 1;
+    c->exp_cache_format[free_slot] = exp_precision(c, layer, exp_id);
     c->exp_cache_used++;
     return true;
 }
@@ -888,7 +1274,54 @@ static void pf_ensure_thread(ds4_ctx_t *c) {
 /* =========================================================================
  * Dynamic cache sizing + WVS attach
  * ========================================================================= */
+/* ── Pre-load hot experts from WVS into cache ── */
+static void preload_hot_experts(ds4_ctx_t *c) {
+    if (!c->wvs || !c->exp_cache) return;
 
+    uint32_t n = ct_wvs_count(c->wvs);
+    if (n == 0) return;
+
+    uint32_t loaded = 0;
+    fprintf(stderr, "[ds4] Pre-loading hot experts from WVS (%u entries)...\n", n);
+
+    for (uint32_t i = 0; i < n; i++) {
+        const ct_wvs_entry_t *entry = ct_wvs_entry(c->wvs, i);
+        if (!entry) continue;
+
+        /* Only pre-load HOT experts */
+        if (entry->hotness != CT_HOTNESS_HOT) continue;
+
+        /* Parse key: "blk.{layer}.exp_{expert_id}" */
+        uint32_t layer, exp_id;
+        if (sscanf(entry->key, "blk.%u.exp_%u", &layer, &exp_id) != 2) continue;
+        if (layer >= c->n_layers || exp_id >= N_EXP) continue;
+
+        /* Already in cache? */
+        if (c->exp_cache_map[layer * N_EXP + exp_id] >= 0) continue;
+
+        /* Cache full? */
+        if (c->exp_cache_used >= c->exp_cache_cap) {
+            fprintf(stderr, "[ds4]  pre-load: cache full after %u hot experts\n", loaded);
+            break;
+        }
+
+        /* Use sequential slot (no eviction — pre-load only fills empty slots) */
+        int slot = (int)c->exp_cache_used;
+        uint8_t *slot_ptr = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+        if (!read_expert_raw(c, layer, exp_id, slot_ptr)) continue;
+
+        c->exp_cache_map[layer * N_EXP + exp_id] = slot;
+        c->exp_cache_heat[slot] = 1;
+        c->exp_cache_format[slot] = exp_precision(c, layer, exp_id);
+        c->exp_cache_used++;
+        loaded++;
+    }
+
+    fprintf(stderr, "[ds4] Pre-loaded %u hot experts into cache (%u/%u slots used)\n",
+            loaded, c->exp_cache_used, c->exp_cache_cap);
+}
+
+/* ── Set WVS scoreboard + allocate expert cache ── */
 void ds4_set_wvs(ds4_ctx_t *c, struct ct_wvs_s *wvs, struct ct_awm_s *awm,
                   uint64_t ram_budget) {
     if (!c) return;
@@ -906,12 +1339,17 @@ void ds4_set_wvs(ds4_ctx_t *c, struct ct_wvs_s *wvs, struct ct_awm_s *awm,
                              : ram_budget;
             uint32_t slots = (uint32_t)(avail / exp_stride(c));
             if (slots < 16)  slots = 16;   /* minimum viable */
-            if (slots > 512) slots = 512;  /* safety cap */
+            /* Adaptive cap: use up to 10 GB for expert cache (scaled by stride),
+             * so machines with ample RAM get more slots → higher cache hit rate. */
+            uint32_t max_slots = (uint32_t)(10737418240ULL / exp_stride(c)); /* 10 GB */
+            if (max_slots < 256) max_slots = 256;  /* floor cap */
+            if (slots > max_slots) slots = max_slots;
             c->exp_cache_cap = slots;
             c->exp_cache_stride = exp_stride(c);
             c->exp_cache = (uint8_t *)calloc(c->exp_cache_cap, c->exp_cache_stride);
             c->exp_cache_map = (int32_t *)malloc(c->n_layers * N_EXP * sizeof(int32_t));
             c->exp_cache_heat = (uint16_t *)calloc(c->exp_cache_cap, sizeof(uint16_t));
+            c->exp_cache_format = (uint8_t *)calloc(c->exp_cache_cap, sizeof(uint8_t));
             if (c->exp_cache_map) {
                 for (uint32_t i = 0; i < c->n_layers * N_EXP; i++)
                     c->exp_cache_map[i] = -1;
@@ -925,6 +1363,12 @@ void ds4_set_wvs(ds4_ctx_t *c, struct ct_wvs_s *wvs, struct ct_awm_s *awm,
 
             /* Start prefetch thread now that cache stride is known */
             pf_ensure_thread(c);
+
+            /* Pre-load hot experts from WVS into cache */
+            preload_hot_experts(c);
+
+            /* Phase D: Proactive expansion — upgrade Q1_0→MXFP4 for hot experts */
+            proactive_expand_hot_experts(c);
         }
     }
 }
@@ -939,6 +1383,7 @@ void ds4_set_bit1_path(ds4_ctx_t *c, const char *path) {
     /* Close any existing .bit1 reader */
     if (c->bit1) {
         if (c->bit1->fp) fclose(c->bit1->fp);
+        free(c->bit1->precision);
         free(c->bit1->index);
         free(c->bit1);
         c->bit1 = NULL;
@@ -974,8 +1419,8 @@ void ds4_set_bit1_path(ds4_ctx_t *c, const char *path) {
         return;
     }
 
-    if (b->hdr.version != BIT1_VERSION) {
-        fprintf(stderr, "[ds4] WARN: .bit1 version %u != expected %u\n",
+    if (b->hdr.version < 1 || b->hdr.version > BIT1_VERSION) {
+        fprintf(stderr, "[ds4] WARN: .bit1 version %u not supported (expected 1..%u)\n",
                 b->hdr.version, BIT1_VERSION);
         fclose(b->fp); free(b);
         return;
@@ -996,20 +1441,55 @@ void ds4_set_bit1_path(ds4_ctx_t *c, const char *path) {
         return;
     }
 
+    /* Read precision map (v2). v1 has no map → all experts Q1_0. */
+    size_t n_experts = (size_t)b->hdr.n_layers * b->hdr.n_experts;
+    b->precision = (uint8_t *)malloc(n_experts);
+    if (!b->precision) {
+        fprintf(stderr, "[ds4] WARN: malloc .bit1 precision map failed\n");
+        free(b->index); fclose(b->fp); free(b);
+        return;
+    }
+    if (b->hdr.version >= 2) {
+        if (fread(b->precision, 1, n_experts, b->fp) != n_experts) {
+            fprintf(stderr, "[ds4] WARN: Failed to read .bit1 precision map from %s\n", path);
+            free(b->precision); free(b->index); fclose(b->fp); free(b);
+            return;
+        }
+    } else {
+        memset(b->precision, 1, n_experts); /* v1: all Q1_0 */
+    }
+
     c->bit1 = b;
     {
-        /* Full file size = header + index + expert data */
+        /* Count Q1_0 experts for accurate size reporting */
+        uint64_t n_q10 = 0;
+        for (size_t i = 0; i < n_experts; i++)
+            if (b->precision[i] == 1) n_q10++;
         uint64_t elems_per_mat = (uint64_t)b->hdr.n_ff * b->hdr.n_embd;
         uint64_t blocks_per_mat = elems_per_mat / b->hdr.block_size;
         uint64_t mat_size = blocks_per_mat * 6; /* Q1_0: 6 bytes/block */
-        uint64_t data_size = (uint64_t)b->n_entries * mat_size;
+        uint64_t data_size = n_q10 * 3 * mat_size;
         uint64_t total = (uint64_t)sizeof(bit1_header_t)
                        + (uint64_t)(b->n_entries * sizeof(bit1_index_entry_t))
+                       + n_experts
                        + data_size;
-        fprintf(stderr, "[ds4] .bit1 loaded: %s (%u layers × %u experts, %.1f GB total, %.1f MB/expert)\n",
+        fprintf(stderr, "[ds4] .bit1 loaded: %s (%u layers × %u experts, %.1f GB total, "
+                "%llu Q1_0 + %llu MXFP4, %.1f MB/expert)\n",
                 path, b->hdr.n_layers, b->hdr.n_experts,
-                (double)total / 1073741824.0, (double)mat_size / 1048576.0);
+                (double)total / 1073741824.0,
+                (unsigned long long)n_q10,
+                (unsigned long long)(n_experts - n_q10),
+                (double)mat_size / 1048576.0);
     }
+}
+
+/* Phase E: Set context window size for large-context decomposition. */
+void ds4_set_ctx_window_size(ds4_ctx_t *c, uint32_t window_size) {
+    if (!c) return;
+    if (window_size < 16) window_size = 16;  /* minimum viable */
+    if (window_size > 4096) window_size = 4096; /* safety cap */
+    c->ctx_window_size = window_size;
+    c->tokens_in_window = 0;
 }
 
 /* =========================================================================
@@ -1029,6 +1509,12 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     const float *shexp_g = c->fast_path_ready ? c->layer_shexp_g[l] : c->wg_e;
     const float *shexp_u = c->fast_path_ready ? c->layer_shexp_u[l] : c->wu_e;
     const float *shexp_d = c->fast_path_ready ? c->layer_shexp_d[l] : c->wd_e;
+    /* BF16 variants (only valid when fast_path_ready) */
+    const uint16_t *wq_a_b    = c->layer_wq_a_bf16    ? c->layer_wq_a_bf16[l]    : NULL;
+    const uint16_t *wkv_b     = c->layer_wkv_bf16     ? c->layer_wkv_bf16[l]     : NULL;
+    const uint16_t *shexp_g_b = c->layer_shexp_g_bf16 ? c->layer_shexp_g_bf16[l] : NULL;
+    const uint16_t *shexp_u_b = c->layer_shexp_u_bf16 ? c->layer_shexp_u_bf16[l] : NULL;
+    const uint16_t *shexp_d_b = c->layer_shexp_d_bf16 ? c->layer_shexp_d_bf16[l] : NULL;
 
     /* --- Attention norm --- */
     if (!c->fast_path_ready) {
@@ -1045,7 +1531,10 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
             matvec(wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
         else memset(c->q_a, 0, Q_DIM * sizeof(float));
     } else {
-        matvec(wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
+        if (wq_a_b)
+            matvec_bf16(wq_a_b, c->h, c->q_a, Q_DIM, N_EMBD);
+        else
+            matvec(wq_a, c->h, c->q_a, Q_DIM, N_EMBD);
     }
 
     if (!c->fast_path_ready) {
@@ -1063,7 +1552,10 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
             matvec(wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
         else memset(c->kv_a, 0, KV_DIM * sizeof(float));
     } else {
-        matvec(wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
+        if (wkv_b)
+            matvec_bf16(wkv_b, c->h, c->kv_a, KV_DIM, N_EMBD);
+        else
+            matvec(wkv, c->h, c->kv_a, KV_DIM, N_EMBD);
     }
 
     if (!c->fast_path_ready) {
@@ -1084,10 +1576,31 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     float mx = -1e30f;
     for (uint32_t p = 0; p < n_pos; p++) {
         float *kslot = c->kv_cache + ((size_t)l * c->ctx_size + p) * KV_DIM;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        uint32_t i;
+        for (i = 0; i + 16 <= KV_DIM; i += 16) {
+            __m256 q0 = _mm256_loadu_ps(c->q_b + i);
+            __m256 q1 = _mm256_loadu_ps(c->q_b + i + 8);
+            __m256 k0 = _mm256_loadu_ps(kslot + i);
+            __m256 k1 = _mm256_loadu_ps(kslot + i + 8);
+            acc0 = _mm256_fmadd_ps(q0, k0, acc0);
+            acc1 = _mm256_fmadd_ps(q1, k1, acc1);
+        }
+        __m256 sum = _mm256_add_ps(acc0, acc1);
+        __m128 hi = _mm256_extractf128_ps(sum, 1);
+        __m128 lo = _mm256_castps256_ps128(sum);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        float dot = _mm_cvtss_f32(sum128);
+        for (; i < KV_DIM; i++) dot += c->q_b[i] * kslot[i];
+#else
         double dot = 0.0;
-        uint32_t dim = KV_DIM < N_EMBD ? KV_DIM : N_EMBD;
-        for (uint32_t i = 0; i < dim; i++) dot += (double)c->q_b[i] * (double)kslot[i];
-        c->scores[p] = (float)dot * scale;
+        for (uint32_t i = 0; i < KV_DIM; i++) dot += (double)c->q_b[i] * (double)kslot[i];
+#endif
+        c->scores[p] = dot * scale;
         if (c->scores[p] > mx) mx = c->scores[p];
     }
     double sum = 0.0;
@@ -1101,7 +1614,19 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     for (uint32_t p = 0; p < n_pos && sum > 0.0; p++) {
         float w = (float)(c->scores[p] / sum);
         float *vslot = c->kv_cache + ((size_t)l * c->ctx_size + p) * KV_DIM;
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256 wv = _mm256_set1_ps(w);
+        uint32_t i;
+        for (i = 0; i + 8 <= KV_DIM; i += 8) {
+            __m256 v = _mm256_loadu_ps(vslot + i);
+            __m256 kv = _mm256_loadu_ps(kv_out + i);
+            kv = _mm256_fmadd_ps(wv, v, kv);
+            _mm256_storeu_ps(kv_out + i, kv);
+        }
+        for (; i < KV_DIM; i++) kv_out[i] += w * vslot[i];
+#else
         for (uint32_t i = 0; i < KV_DIM; i++) kv_out[i] += w * vslot[i];
+#endif
     }
     /* Expand KV_DIM → N_EMBD */
     for (uint32_t i = 0; i < N_EMBD; i++) c->attn_out[i] = kv_out[i % KV_DIM];
@@ -1189,8 +1714,12 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
                 ct_wvs_record_access(c->wvs, exp_key);
             }
 
-            /* Try cache first, fall back to SSD */
+            /* Try cache first, fall back to SSD.
+             * When from_cache is true, fused_raw points to compressed bytes in cache
+             * and fused_format tells us Q1_0 (1) or MXFP4 (0). */
             bool from_cache = false;
+            const uint8_t *fused_raw = NULL;
+            uint8_t fused_format = 0;
             if (use_cache) {
                 const uint8_t *preloaded = NULL;
 
@@ -1202,8 +1731,8 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
                     from_cache = exp_cache_ensure(c, l, (uint32_t)eid, preloaded);
                     if (from_cache) {
                         int32_t slot = c->exp_cache_map[l * N_EXP + eid];
-                        const uint8_t *raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
-                        dequant_expert_cache(c, raw, c->wg_e, c->wu_e, c->wd_e);
+                        fused_raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+                        fused_format = c->exp_cache_format[slot];
                     }
 
                     /* Start prefetch for next uncached expert */
@@ -1219,8 +1748,8 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
                     from_cache = exp_cache_ensure(c, l, (uint32_t)eid, preloaded);
                     if (from_cache) {
                         int32_t slot = c->exp_cache_map[l * N_EXP + eid];
-                        const uint8_t *raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
-                        dequant_expert_cache(c, raw, c->wg_e, c->wu_e, c->wd_e);
+                        fused_raw = c->exp_cache + (size_t)slot * c->exp_cache_stride;
+                        fused_format = c->exp_cache_format[slot];
                     }
                 }
             }
@@ -1236,13 +1765,41 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
                 if (!ok_g || !ok_u || !ok_d) continue;
             }
 
-            /* SwiGLU */
-            matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
-            matvec(c->wu_e, c->h, c->ffn_up,  N_FF, N_EMBD);
-            for (uint32_t i = 0; i < N_FF; i++)
-                c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
-
-            matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+            /* SwiGLU — fused dequant+matvec when from_cache, else f32 matvec */
+            if (fused_raw) {
+                /* Fused dequant + matvec: no intermediate 100 MB f32 buffer */
+                if (fused_format == 1) {
+                    /* Q1_0 path */
+                    const ct_q1_0_block_t *qg = (const ct_q1_0_block_t *)fused_raw;
+                    const ct_q1_0_block_t *qu = (const ct_q1_0_block_t *)(fused_raw + DS4_EXP_Q1_MATRIX_BYTES);
+                    const ct_q1_0_block_t *qd = (const ct_q1_0_block_t *)(fused_raw + DS4_EXP_Q1_MATRIX_BYTES * 2);
+                    dequant_matvec_q1_0(qg, c->h, c->ffn_mid, N_FF, N_EMBD);
+                    dequant_matvec_q1_0(qu, c->h, c->ffn_up,  N_FF, N_EMBD);
+                    for (uint32_t i = 0; i < N_FF; i++)
+                        c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+                    dequant_matvec_q1_0(qd, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+                } else {
+                    /* MXFP4 path */
+                    const uint8_t *gr = fused_raw;
+                    const uint8_t *ur = fused_raw + DS4_EXP_GATE_BYTES;
+                    const uint8_t *dr = fused_raw + DS4_EXP_GATE_BYTES + DS4_EXP_UP_BYTES;
+                    dequant_matvec_mxfp4(gr, c->h, c->ffn_mid, N_FF, N_EMBD,
+                                         DS4_EXP_GATE_ROW_BLOCKS, DS4_EXP_GATE_ROW_BYTES);
+                    dequant_matvec_mxfp4(ur, c->h, c->ffn_up,  N_FF, N_EMBD,
+                                         DS4_EXP_GATE_ROW_BLOCKS, DS4_EXP_GATE_ROW_BYTES);
+                    for (uint32_t i = 0; i < N_FF; i++)
+                        c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+                    dequant_matvec_mxfp4(dr, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF,
+                                         DS4_EXP_DOWN_ROW_BLOCKS, DS4_EXP_DOWN_ROW_BYTES);
+                }
+            } else {
+                /* f32 fallback (SSD path) */
+                matvec(c->wg_e, c->h, c->ffn_mid, N_FF, N_EMBD);
+                matvec(c->wu_e, c->h, c->ffn_up,  N_FF, N_EMBD);
+                for (uint32_t i = 0; i < N_FF; i++)
+                    c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+                matvec(c->wd_e, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+            }
             for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
         }
 
@@ -1254,12 +1811,18 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
             fprintf(stderr, "[ds4]   expert loop %u: %.2fs wall\n", l, dt_exp);
         }
 
-        /* Periodic WVS decay */
+        /* Phase E: Large-context decomposition — WVS update at window boundaries.
+         * Instead of a fixed 50-token interval, update WVS + proactive expansion
+         * after each context window (default 256 tokens). This lets WVS adapt to
+         * the changing expert distribution across context windows. */
         if (c->wvs) {
-            c->token_count++;
-            if (c->token_count >= DS4_EXP_WVS_DECAY_INTERVAL) {
+            c->tokens_in_window++;
+            if (c->tokens_in_window >= c->ctx_window_size) {
                 ct_wvs_update_all(c->wvs);
-                c->token_count = 0;
+                c->tokens_in_window = 0;
+
+                /* Phase D: Proactive expansion after WVS update */
+                proactive_expand_hot_experts(c);
             }
         }
     }
@@ -1277,11 +1840,19 @@ static void ds4_layer(ds4_ctx_t *c, uint32_t l, uint32_t pos) {
     }
 
     if (has_shexp) {
-        matvec(shexp_g, c->h, c->ffn_mid, N_FF, N_EMBD);
-        matvec(shexp_u, c->h, c->ffn_up,  N_FF, N_EMBD);
-        for (uint32_t i = 0; i < N_FF; i++)
-            c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
-        matvec(shexp_d, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+        if (shexp_g_b && shexp_u_b && shexp_d_b) {
+            matvec_bf16(shexp_g_b, c->h, c->ffn_mid, N_FF, N_EMBD);
+            matvec_bf16(shexp_u_b, c->h, c->ffn_up,  N_FF, N_EMBD);
+            for (uint32_t i = 0; i < N_FF; i++)
+                c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+            matvec_bf16(shexp_d_b, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+        } else {
+            matvec(shexp_g, c->h, c->ffn_mid, N_FF, N_EMBD);
+            matvec(shexp_u, c->h, c->ffn_up,  N_FF, N_EMBD);
+            for (uint32_t i = 0; i < N_FF; i++)
+                c->ffn_mid[i] = silu_f(c->ffn_mid[i]) * c->ffn_up[i];
+            matvec(shexp_d, c->ffn_mid, c->ffn_tmp, N_EMBD, N_FF);
+        }
         for (uint32_t i = 0; i < N_EMBD; i++) c->ffn_acc[i] += c->ffn_tmp[i];
     }
 

@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/language-C11-blue" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey" />
-  <img src="https://img.shields.io/badge/tests-21%20unit%20%7C%203%20integration-brightgreen" />
+  <img src="https://img.shields.io/badge/tests-37%20unit%20%7C%203%20integration-brightgreen" />
 </p>
 
 > 🌐 [English](README.md)

@@ -57,6 +57,11 @@ void ds4_set_wvs(ds4_ctx_t *c, struct ct_wvs_s *wvs, struct ct_awm_s *awm,
  * Pass NULL to revert to GGUF split reading (default). */
 void ds4_set_bit1_path(ds4_ctx_t *c, const char *path);
 
+/* Phase E: Set context window size for large-context decomposition.
+ * WVS update + proactive expansion happen at window boundaries
+ * instead of a fixed token interval. Default: 256. */
+void ds4_set_ctx_window_size(ds4_ctx_t *c, uint32_t window_size);
+
 /* Forward one token, returns logits[n_vocab]. NULL on error.
  * pos: absolute position in sequence (0-indexed).
  * Weights are streamed from SSD via gguf_split_read_tensor_at(). */

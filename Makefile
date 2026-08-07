@@ -1,7 +1,7 @@
 # CAUTREO (Cầu Treo) — Makefile
 #
 # Build:        make            → libcautreo_core.a + libcautreo_engine.a
-# Test:         make test       → 21 unit tests
+# Test:         make test       → 37 unit tests
 # Integration:  make integration→ 3 integration tests
 # All tests:    make all-tests  → unit + integration
 # Benchmark:    make bench      → performance benchmarks

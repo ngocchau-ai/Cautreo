@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased] — Documentation Reorganization
+
+### Changed
+- Tách tài liệu nội bộ vào `.internal/`: `architecture-v2.md`, `engine-reanalysis.md`, `session-correlation.md`, `memory/`, `shared_memory.json`, `probe_gen.c`, `wvssize_test.c`, `_ds4.s`.
+- `.gitignore` cập nhật để exclude `.internal/` và các đường dẫn cũ.
+- `README.md` / `README.vi.md`: cập nhật test count (21→37), xoá tham chiếu `memory/` khỏi cấu trúc repo.
+- `Makefile`: cập nhật header test count.
+
+---
+
+## [Unreleased] — Session Correlation (Bootstrapping WVS)
+
+### Added
+- `.internal/session-correlation.md` — Thuật toán tương quan session chat → trọng số → seed WVS.
+  Không xây mới WVS; bổ sung cơ chế seed initial scores từ lịch sử chat agent
+  (Hermes, Antigravity, Codex) để loại bỏ cold start.
+- Cập nhật `.internal/architecture-v2.md` — thêm LỚP 7: Session Correlator.
+- Cập nhật `.internal/memory/03-codegraph/codegraph-summary.md` — thêm module `correlator/`.
+
+### Survey: Session Data Sources
+- **Hermes:** `~/.hermes/sessions/` (SQLite FTS5), ~10-20 sessions.
+- **Antigravity:** `~/.gemini/antigravity/conversations/` (.db + .pb), ~60+ conversations.
+- **Codex CLI:** `~/.codex/` (JSON state), ~5-10 threads.
+
+---
+
 ## [0.7.0] — 2026-08-06 — Architecture Abstraction Layer & Full Test Suite Green
 
 ### Added
@@ -39,7 +65,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - `Makefile`: Added `src/arch/*.c` to `ENGINE_SRCS`, `arch_test.exe` to `V2_TEST_BINS`.
-- `docs/architecture-v2.md`: Added Section 8 (Architecture Abstraction Layer), updated module table, renumbered sections.
+- `.internal/architecture-v2.md`: Added Section 8 (Architecture Abstraction Layer), updated module table, renumbered sections.
 - `src/engine/engine.c`: Refactored to dispatch through arch vtable; removed hardcoded DS4 forward calls.
 
 ---

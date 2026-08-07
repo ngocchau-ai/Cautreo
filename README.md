@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/language-C11-blue" />
   <img src="https://img.shields.io/badge/license-MIT-green" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey" />
-  <img src="https://img.shields.io/badge/tests-21%20unit%20%7C%203%20integration-brightgreen" />
+  <img src="https://img.shields.io/badge/tests-37%20unit%20%7C%203%20integration-brightgreen" />
 </p>
 
 > 🌐 [Tiếng Việt](README.vi.md)
@@ -102,7 +102,7 @@
 ```bash
 # Requires: C11 compiler (clang/gcc/LLVM-MinGW), GNU Make
 make              # build libcautreo_core.a + libcautreo_engine.a
-make test         # run 21 unit tests
+make test         # run 37 unit tests
 make integration  # run 3 integration tests
 make vivy         # build + run the CLI demo (synthetic GGUF)
 ```
@@ -242,7 +242,7 @@ CAUTREO/
 │   ├── server/            # HTTP server (OpenAI-compatible API)
 │   └── agent/             # Agent loop (WASTE + multi-turn + memory)
 ├── tests/
-│   ├── unit/              # 21 unit test suites
+│   ├── unit/              # 37 unit test suites
 │   └── integration/       # 3 integration tests
 ├── benchmarks/            # Engine + streaming benchmarks
 ├── tools/
@@ -259,8 +259,6 @@ CAUTREO/
 │       ├── architecture.md
 │       ├── design-philosophy.md
 │       └── server-api.md
-├── memory/
-│   └── 03-codegraph/      # Auto-generated dependency map (731 nodes)
 ├── Makefile
 ├── README.md              # This file (English)
 └── README.vi.md           # Vietnamese version
@@ -294,7 +292,7 @@ The 13 modules implement a full **reasoning loop**:
 | `make` | Build `libcautreo_core.a` + `libcautreo_engine.a` |
 | `make core` | Build core library only |
 | `make engine` | Build engine library only |
-| `make test` | Build + run 21 unit tests |
+|| `make test` | Build + run 37 unit tests |
 | `make integration` | Build + run 3 integration tests |
 | `make all-tests` | Unit + integration |
 | `make bench` | Build + run performance benchmarks |
@@ -308,7 +306,7 @@ The 13 modules implement a full **reasoning loop**:
 ## Test Results
 
 ```
-Unit tests (21 suites):           21/21 PASS
+Unit tests (26 suites):          37/37 PASS
 Integration: streaming_engine:     9/9  PASS
 Integration: core_engine:              PASS
 Integration: agent_e2e:                PASS
